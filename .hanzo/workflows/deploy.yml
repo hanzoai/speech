@@ -1,0 +1,42 @@
+# speech — build the image. Same lane as billing: git.hanzo.ai push → act_runner
+# (hanzo-build-linux-amd64) → docker build → ghcr.io/hanzoai/speech:<semver>.
+#
+# SEMVER, NEVER SHA. The version is pyproject's, and a published tag is never
+# overwritten — two digests behind one name is the fleet's oldest trap.
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-speech-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [hanzo-build-linux-amd64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Version from pyproject, refused if already published
+        id: v
+        run: |
+          V=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          T=$(curl -s "https://ghcr.io/token?scope=repository:hanzoai/speech:pull" | jq -r .token)
+          C=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/hanzoai/speech/manifests/$V")
+          if [ "$C" = "200" ]; then echo "::error::$V already published — bump pyproject"; exit 1; fi
+
+      - name: Build and push
+        run: |
+          docker build -t "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}" .
+          docker push "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}"

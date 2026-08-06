@@ -1,0 +1,13 @@
+[project]
+name = "speech"
+version = "0.1.0"
+description = "CPU speech: STT (faster-whisper) + TTS (kokoro) behind one OpenAI-shaped surface"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.34",
+  "python-multipart>=0.0.20",
+  "faster-whisper>=1.1",
+  "kokoro-onnx>=0.4",
+  "soundfile>=0.13",
+]
