@@ -25,15 +25,16 @@ jobs:
       # image bakes 350MB of weights; discovering a contract break after that is
       # discovering it too late.
       #
-      # Through docker rather than a bare `uv`: this runner is guaranteed to have
-      # docker (it builds the image below) and is NOT guaranteed to have uv, so
-      # calling uv directly makes the gate depend on how the runner image happens
-      # to be built. The pinned uv image also fixes the Python version, so the
-      # suite runs on the same 3.12 the Dockerfile installs.
+      # As a BUILD STAGE, not a `docker run`: `docker build` is the one thing
+      # this lane is already known to do. A bare `uv` depends on how the runner
+      # image happens to be built, and `docker run -v "$PWD":/w` depends on the
+      # runner sharing a filesystem with the docker daemon — under
+      # docker-in-docker that path resolves on the host, not in the runner, and
+      # the container mounts an empty directory. Both fail for reasons that have
+      # nothing to do with the code. This has neither dependency, and it reuses
+      # the layers the build below already needs.
       - name: Test
-        run: |
-          docker run --rm -v "$PWD":/w -w /w ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
-            sh -c 'uv sync --frozen --group dev && uv run pytest -q'
+        run: docker build --target test -t speech-test .
 
       - uses: docker/login-action@v3
         with:
