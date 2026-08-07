@@ -34,9 +34,14 @@ async def transcriptions(
 ):
     if model not in stt.MODELS:
         raise HTTPException(404, f"unknown model {model!r}")
-    text = stt.transcribe(model, await file.read(), language)
+    text, duration = stt.transcribe(model, await file.read(), language)
     if response_format == "text":
         return Response(text, media_type="text/plain")
+    # verbose_json carries `duration`, exactly as OpenAI's does — and the ai
+    # plane asks for it because that duration is what meters the call. Plain
+    # json stays {"text"} so a client reading the standard shape is unaffected.
+    if response_format == "verbose_json":
+        return JSONResponse({"text": text, "duration": duration})
     return JSONResponse({"text": text})
 
 
@@ -46,5 +51,15 @@ def speech(ask: tts.Ask):
         raise HTTPException(404, f"unknown model {ask.model!r}")
     if ask.voice not in tts.VOICES:
         raise HTTPException(400, f"unknown voice {ask.voice!r}")
+    # Refuse a format we cannot make, rather than answering in a different one:
+    # every format below is really encoded, and anything else is a 400 naming
+    # what IS available. Substituting silently is how a caller asking for opus
+    # received an MP3 labelled audio/opus.
+    if ask.response_format not in tts.FORMATS:
+        raise HTTPException(
+            400,
+            f"unsupported response_format {ask.response_format!r}; "
+            f"supported: {', '.join(sorted(tts.FORMATS))}",
+        )
     audio, mime = tts.speak(ask)
     return Response(audio, media_type=mime)
