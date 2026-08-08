@@ -17,6 +17,9 @@ in a stage above the weight bake and never sees this file.
 """
 
 import io
+import os
+import subprocess
+import sys
 import time
 
 import numpy
@@ -119,6 +122,40 @@ def test_the_seconds_billed_are_the_seconds_spoken(said):
     assert billed == pytest.approx(spoken)
     assert live.seconds == pytest.approx(spoken)
     assert spoken > 4.0, "a real sentence, not a click"
+
+
+def test_the_process_exits_cleanly_mid_decode(said, tmp_path):
+    """Shut down while a decode is running and the process must still exit 0.
+
+    A thread sitting inside the model's C++ when the interpreter tears down makes
+    the C++ runtime abort — `terminate called without an active exception`,
+    SIGABRT. Every test still reports passed, because the failure is in the exit
+    code and not in the report; in a pod it is a container that cannot drain on
+    SIGTERM. Only real weights reproduce it: a stand-in has no native code to
+    abort in.
+
+    The model is loaded first and the child pauses after pushing, so shutdown
+    lands mid-decode by construction rather than by luck.
+    """
+    raw = tmp_path / "said.pcm"
+    raw.write_bytes(said)
+    child = (
+        "import time, stt, transcript;"
+        "stt.load('whisper');"
+        "live = transcript.begin('whisper', 'en');"
+        f"pcm = open({str(raw)!r}, 'rb').read();"
+        "[live.push(pcm[a:a + transcript.CHUNK])"
+        " for a in range(0, len(pcm), transcript.CHUNK)];"
+        "time.sleep(0.5)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True, timeout=600,
+    )
+    assert done.returncode == 0, (
+        f"exit {done.returncode}\n{done.stderr.decode()[-800:]}"
+    )
 
 
 def test_the_batch_route_still_reports_a_real_duration(said):

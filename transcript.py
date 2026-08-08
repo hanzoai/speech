@@ -21,6 +21,7 @@ reports as `duration`, measured the same way, and it is what the call is billed 
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import stt
 
@@ -35,6 +36,20 @@ GUARD = 1.0  # trailing seconds never committed: the last word may still be movi
 WINDOW = 12.0  # past this the guard is dropped, so the window cannot grow forever
 IDLE = 30.0  # a session untouched this long is collectable
 LIMIT = 600.0  # audio one session will accept, in seconds
+
+# Decoding is CPU-bound and the pod is capped at 4 cores, so two at a time leaves
+# room for the request path to keep acking. Sessions beyond that queue rather than
+# thrash: more concurrent decodes than cores makes every session slower, not one
+# session faster.
+#
+# A pool, not a thread per session, for a second reason that is not about speed:
+# its workers are joined when the interpreter shuts down. Raw daemon threads are
+# not, and a thread still inside the model's C++ when the runtime tears down
+# aborts the process — `terminate called without an active exception`, SIGABRT,
+# with every test passing and the run still red. In a pod that is a container
+# that cannot drain on SIGTERM.
+WORKERS = 2
+_pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="decode")
 
 
 class Transcript:
@@ -77,7 +92,7 @@ class Transcript:
             if start:
                 self._decoding = True
         if start:
-            threading.Thread(target=self._work, daemon=True).start()
+            _pool.submit(self._work)
         return len(pcm) / stt.SECOND
 
     def close(self) -> None:
