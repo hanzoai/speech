@@ -18,12 +18,15 @@ exactly, and it cannot silently become zero: it is the same quantity `transcribe
 reports as `duration`, measured the same way, and it is what the call is billed on.
 """
 
+import logging
 import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import stt
+
+log = logging.getLogger(__name__)
 
 # 250 ms per push at 16 kHz mono int16. Small enough to sit inside one ZAP frame,
 # which the transport requires: a request is built as a single frame, so audio
@@ -127,6 +130,12 @@ class Transcript:
                         self._decoding = False
                         return
         except BaseException:
+            # The pool keeps a worker's exception inside its Future, and this one
+            # is discarded — so without this the transcript simply stays empty
+            # while every push still acks 200. Logged BEFORE standing down, so
+            # anything watching the flag sees the reason first. The next push
+            # starts a fresh attempt.
+            log.exception("decode failed for %s", self.id)
             with self._lock:
                 self._decoding = False
             raise

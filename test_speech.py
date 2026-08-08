@@ -453,3 +453,24 @@ def test_samples_map_int16_onto_the_unit_range(ear):
     got = stt.samples(numpy.array([0, 16384, -32768], dtype="<i2").tobytes())
     assert got.dtype == numpy.float32
     assert list(got) == [0.0, 0.5, -1.0]
+
+
+class _Deaf:
+    """A model that fails, to check the failure is visible rather than quiet."""
+
+    def transcribe(self, audio, language=None, vad_filter=None):
+        raise RuntimeError("decoder is unhappy")
+
+
+def test_a_failed_decode_says_so(monkeypatch, caplog):
+    """A decode runs in a pool whose Future is discarded, so an exception in it
+    reaches nobody: pushes keep acking 200 with the right `duration` and the
+    transcript is simply always empty. Failure has to be loud enough to find."""
+    monkeypatch.setattr(stt, "load", lambda m: _Deaf())
+    transcript._live.clear()
+    live = transcript.begin("whisper", None)
+    with caplog.at_level("ERROR"):
+        live.push(tone(1, 2.0))
+        settle(live)
+    assert "decoder is unhappy" in caplog.text
+    assert live.text == "" and live.pending == ""

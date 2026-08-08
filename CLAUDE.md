@@ -58,3 +58,15 @@ the plane, and `ai` has no route for it yet either.
   leaves the real one free to regress.
 - Deploy is declarative: universe `charts/app/values/hanzo/speech.yaml` pins
   the semver; no ingress (in-cluster only).
+- **Verifying a deploy: the deployment's image is not the served image.** After a
+  pin, `deploy/speech` reports the new tag immediately while the old pods still
+  answer — the image is ~1.5 GB, so the pull alone runs about a minute and the
+  ReplicaSets overlap. `readyReplicas` counts the OLD pods during that window, so
+  it reads 2/2 and means nothing. Check for a READY pod on the new digest, then
+  ask the running app what it serves (`/openapi.json`) or push real audio through
+  it. There is no ingress, so probing is `kubectl port-forward svc/speech` — which
+  attaches to ONE pod, so mid-rollout it may answer from either version.
+- Pushes to main have twice failed to create an Actions run (the run is simply
+  never created; `workflow_dispatch` on the same ref works, and other repos on
+  the forge still trigger on push). Check for a run after pushing rather than
+  assuming one exists — the previous release was dispatched by hand too.
