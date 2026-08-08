@@ -1,6 +1,6 @@
 [project]
 name = "speech"
-version = "0.1.3"
+version = "0.1.4"
 description = "CPU speech: STT (faster-whisper) + TTS (kokoro) behind one OpenAI-shaped surface"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,6 +10,9 @@ dependencies = [
   "faster-whisper>=1.1",
   "kokoro-onnx>=0.4",
   "soundfile>=0.13",
+  # Raw audio is handed to the model as an array, so this is imported directly
+  # rather than reached through faster-whisper.
+  "numpy>=2.0",
 ]
 
 # The suite stubs the two model calls, so it needs neither weights nor a GPU and

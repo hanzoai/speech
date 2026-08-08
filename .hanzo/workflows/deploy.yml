@@ -36,6 +36,15 @@ jobs:
       - name: Test
         run: docker build --target test -t speech-test .
 
+      # The same code against the REAL models: kokoro speaks a sentence and
+      # whisper has to say it back. The suite above replaces faster-whisper with a
+      # stand-in — which is what makes the window arithmetic checkable exactly, and
+      # also what makes it blind to a decoder that stopped working. This is the
+      # only step that would notice. It reuses the weight layer the image build
+      # needs anyway, so it costs a decode and not a download.
+      - name: Test against the real models
+        run: docker build --target live -t speech-live .
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

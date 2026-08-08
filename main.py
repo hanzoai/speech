@@ -5,10 +5,14 @@ and meters every caller before a request reaches this service; a provider row
 pointing at http://speech.hanzo.svc/v1 is the whole integration.
 """
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import time
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 import stt
+import transcript
 import tts
 
 app = FastAPI(title="speech", docs_url=None, redoc_url=None)
@@ -43,6 +47,83 @@ async def transcriptions(
     if response_format == "verbose_json":
         return JSONResponse({"text": text, "duration": duration})
     return JSONResponse({"text": text})
+
+
+class Open(BaseModel):
+    model: str = "whisper"
+    language: str | None = None
+    format: str = "pcm16"
+    rate: int = stt.RATE
+    channels: int = 1
+
+
+# ── the streaming sibling of /v1/audio/transcriptions ───────────────────────
+#
+# Half duplex over ordinary HTTP: the client POSTs a chunk of audio and the
+# RESPONSE to that POST carries the transcript. No socket, no second leg.
+#
+# That is not a preference. `ai` is a child process reached over ZAP, and ZAP
+# builds a request as ONE frame — there is no request-head frame and no upgrade
+# path, so neither a WebSocket nor a streamed request body can reach this service.
+# A chunk small enough to fit one frame is the shape the transport actually has.
+# It also makes backpressure structural: chunk n+1 cannot be sent until n is
+# acked, so a slow server slows the microphone instead of queueing audio.
+
+
+@app.post("/v1/audio/transcript", status_code=201)
+def transcript_open(ask: Open):
+    if ask.model not in stt.MODELS:
+        raise HTTPException(404, f"unknown model {ask.model!r}")
+    # Raw audio carries no header saying what it is, so a mismatch here is silent
+    # noise rather than an error: 8 kHz read as 16 kHz transcribes as gibberish.
+    # Refuse it by name instead of resampling something we were told is correct.
+    if (ask.format, ask.rate, ask.channels) != ("pcm16", stt.RATE, 1):
+        raise HTTPException(
+            400,
+            f"expected pcm16 mono at {stt.RATE} Hz; "
+            f"got {ask.format!r} {ask.channels}ch at {ask.rate} Hz",
+        )
+    live = transcript.begin(ask.model, ask.language)
+    return {
+        "id": live.id,
+        "model": live.model,
+        "format": "pcm16",
+        "rate": stt.RATE,
+        "channels": 1,
+        "chunk_ms": round(transcript.CHUNK / stt.SECOND * 1000),
+        "max_bytes": transcript.CEILING,
+        "max_seconds": transcript.LIMIT,
+        "idle_seconds": transcript.IDLE,
+        "expires_at": int(time.time() + transcript.IDLE),
+    }
+
+
+@app.post("/v1/audio/transcript/{tid}")
+async def transcript_push(tid: str, request: Request):
+    """Take a chunk, answer with the newest state. `duration` is what this push
+    consumed — the field the plane meters, named as the batch route names it."""
+    live = transcript.find(tid)
+    if live is None:
+        raise HTTPException(404, f"no transcript {tid!r}")
+    pcm = await request.body()
+    if len(pcm) > transcript.CEILING:
+        raise HTTPException(413, f"chunk is {len(pcm)} bytes; limit {transcript.CEILING}")
+    if len(pcm) % stt.WIDTH:
+        raise HTTPException(400, f"{len(pcm)} bytes is not whole int16 frames")
+    if live.full:
+        raise HTTPException(409, f"transcript is at its {transcript.LIMIT}s limit; close it")
+    return live.state(live.push(pcm))
+
+
+@app.delete("/v1/audio/transcript/{tid}")
+def transcript_close(tid: str):
+    """Close: decode the remainder and commit it. No audio arrives, so nothing is
+    billed here — every second was already metered by the push that carried it."""
+    live = transcript.drop(tid)
+    if live is None:
+        raise HTTPException(404, f"no transcript {tid!r}")
+    live.close()
+    return live.state()
 
 
 @app.post("/v1/audio/speech")

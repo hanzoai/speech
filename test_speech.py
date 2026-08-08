@@ -6,11 +6,15 @@ faster-whisper and kokoro rather than this service. What IS this service's own
 is the shape of what it returns — which is exactly where both defects lived.
 """
 
+import time
+
+import numpy
 import pytest
 from fastapi.testclient import TestClient
 
 import main
 import stt
+import transcript
 import tts
 
 client = TestClient(main.app)
@@ -199,3 +203,253 @@ def test_transcribe_forwards_the_language_hint(monkeypatch):
     stt.transcribe("whisper", b"x", "de")
     assert model.called_with["language"] == "de"
     assert model.called_with["vad_filter"] is True
+
+
+# ── the growing transcript ──────────────────────────────────────────────────
+#
+# These stub the MODEL, never `stt.segments` or `Transcript` — so the real
+# decode-window arithmetic runs. Stubbing the layer under test is how the first
+# duration defect survived its own suite.
+#
+# The stand-in reads the audio it is HANDED and names each segment after the
+# sample values inside it, so the text is a function of which bytes are in the
+# window. A trim that drops the wrong bytes, drops too many, or drops none does
+# not merely change a length here — it changes the words.
+
+
+def tone(value: int, seconds: float) -> bytes:
+    """PCM16 whose every sample is `value`: audio that says its own name."""
+    return numpy.full(int(seconds * stt.RATE), value, dtype="<i2").tobytes()
+
+
+class _Seg:
+    def __init__(self, text, start, end):
+        self.text, self.start, self.end = text, start, end
+
+
+class _Span:
+    def __init__(self, span):
+        self.duration = span
+        self.duration_after_vad = span / 2
+
+
+class _Ear:
+    """faster-whisper's shape: cuts what it is given on a fixed grid and reads
+    each piece's own samples back as its text."""
+
+    STEP = 2.0
+
+    def __init__(self):
+        self.spans = []
+
+    def transcribe(self, audio, language=None, vad_filter=None):
+        span = len(audio) / stt.RATE
+        self.spans.append(span)
+        segs, at = [], 0.0
+        while at < span - 1e-9:
+            end = min(at + self.STEP, span)
+            mid = int((at + end) / 2 * stt.RATE)
+            segs.append(_Seg(str(round(float(audio[mid]) * 32768)), at, end))
+            at = end
+        return iter(segs), _Span(span)
+
+
+@pytest.fixture
+def ear(monkeypatch):
+    """Put the stand-in under `stt.load`, so `stt.segments` and the whole window
+    are the real code — only faster-whisper itself is replaced."""
+    heard = _Ear()
+    monkeypatch.setattr(stt, "load", lambda m: heard)
+    transcript._live.clear()
+    yield heard
+    transcript._live.clear()
+
+
+def settle(live, timeout=10.0):
+    """Wait for the background decode to stand down — the ack deliberately does
+    not, so a test that reads the text must."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        with live._lock:
+            if not live._decoding:
+                return
+        time.sleep(0.005)
+    raise AssertionError("decode never settled")
+
+
+def start(**over):
+    body = {"model": "whisper", "language": "en"} | over
+    r = client.post("/v1/audio/transcript", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+# ── metering: the reason this endpoint can exist at all ─────────────────────
+
+def test_push_meters_the_audio_it_carried(ear):
+    """`duration` is the seconds THIS push brought, named as the batch route
+    names it so the plane meters both by one rule. A push that reports 0 is
+    audio served free."""
+    live = start()
+    chunk = tone(7, 0.25)  # 8000 bytes
+    r = client.post(f"/v1/audio/transcript/{live['id']}", content=chunk)
+    assert r.status_code == 200, r.text
+    assert r.json()["duration"] == 0.25
+    assert r.json()["seconds"] == 0.25
+
+
+def test_a_session_bills_every_second_once_and_only_once(ear):
+    """The sum of what the pushes reported must equal the audio submitted —
+    under-counting serves audio free, over-counting bills for silence that was
+    never sent. Close adds no audio, so it must add no charge."""
+    live = start()
+    sent = 0.0
+    billed = 0.0
+    for n in range(12):  # 3 s in 250 ms pushes
+        r = client.post(f"/v1/audio/transcript/{live['id']}", content=tone(n + 1, 0.25))
+        billed += r.json()["duration"]
+        sent += 0.25
+    shut = client.delete(f"/v1/audio/transcript/{live['id']}")
+    assert shut.status_code == 200, shut.text
+    assert shut.json()["duration"] == 0.0, "close carries no audio, so it bills none"
+    assert billed == pytest.approx(sent), "every second submitted, billed exactly once"
+    assert shut.json()["seconds"] == pytest.approx(sent)
+
+
+def test_seconds_come_from_the_bytes_not_from_the_decoder(ear):
+    """Metering must not depend on the model returning anything. A decoder that
+    hears silence still consumed the audio it was sent."""
+    live = transcript.begin("whisper", None)
+    assert live.push(tone(0, 1.5)) == 1.5
+    assert live.seconds == 1.5
+
+
+# ── the window: what is settled commits, what is still moving does not ──────
+
+def test_settled_words_commit_and_their_audio_is_freed(ear):
+    """A segment that ended a guard-length before the audio did cannot change, so
+    it is committed and its bytes are dropped. The text names the samples, so a
+    wrong trim shows up as wrong words."""
+    live = transcript.begin("whisper", None)
+    for value in (1, 2, 3):
+        live.push(tone(value, 2.0))
+    settle(live)
+
+    assert live.text == "1 2", "the first two tones are settled"
+    assert live.pending == "3", "the last is still open and stays revisable"
+    assert len(live._window) == int(2.0 * stt.SECOND), "committed audio is freed"
+
+
+def test_the_open_tail_is_never_committed_early(ear):
+    """Everything within GUARD of the end stays pending: committing it would
+    freeze a word that the next chunk may still change."""
+    live = transcript.begin("whisper", None)
+    live.push(tone(9, 1.5))
+    settle(live)
+    assert live.text == "", "nothing is settled yet"
+    assert live.pending == "9"
+
+
+def test_close_commits_the_remainder(ear):
+    """Nothing follows a close, so the guard has nothing to protect — the tail is
+    decoded and committed, or the last words are lost."""
+    live = transcript.begin("whisper", None)
+    for value in (1, 2, 3):
+        live.push(tone(value, 2.0))
+    settle(live)
+    live.close()
+    assert live.text == "1 2 3"
+    assert live.pending == ""
+
+
+def test_the_window_stays_bounded(ear):
+    """Committed audio is dropped, so a long session decodes a window that stops
+    growing instead of one that grows with the call."""
+    live = transcript.begin("whisper", None)
+    for value in range(1, 31):  # 60 s
+        live.push(tone(value, 2.0))
+        settle(live)
+    assert len(live._window) <= int(transcript.WINDOW * stt.SECOND)
+    assert max(ear.spans) <= transcript.WINDOW
+
+
+def test_text_is_never_duplicated_across_trims(ear):
+    """A commit that failed to free its audio would decode the same words again
+    and say them twice. Each tone must appear exactly once."""
+    live = transcript.begin("whisper", None)
+    for value in range(1, 11):
+        live.push(tone(value, 2.0))
+        settle(live)
+    live.close()
+    assert live.text.split() == [str(v) for v in range(1, 11)]
+
+
+# ── the surface ─────────────────────────────────────────────────────────────
+
+def test_open_states_the_shape_it_wants(ear):
+    live = start()
+    assert live["rate"] == 16000 and live["channels"] == 1 and live["format"] == "pcm16"
+    assert live["id"].startswith("atr_")
+    assert live["chunk_ms"] == 256
+
+
+def test_a_different_rate_is_refused_not_resampled(ear):
+    """Raw audio carries no header, so the wrong rate is not an error downstream
+    — it is gibberish that transcribes successfully."""
+    r = client.post("/v1/audio/transcript", json={"model": "whisper", "rate": 8000})
+    assert r.status_code == 400
+    assert "16000" in r.text
+
+
+def test_unknown_model_is_404_on_open(ear):
+    r = client.post("/v1/audio/transcript", json={"model": "not-a-model"})
+    assert r.status_code == 404
+
+
+def test_unknown_transcript_is_404(ear):
+    r = client.post("/v1/audio/transcript/atr_nope", content=tone(1, 0.25))
+    assert r.status_code == 404
+
+
+def test_oversize_chunk_is_refused_not_truncated(ear):
+    live = start()
+    r = client.post(f"/v1/audio/transcript/{live['id']}", content=tone(1, 3.0))
+    assert r.status_code == 413
+
+
+def test_half_a_sample_is_refused(ear):
+    """An odd byte count is not int16 frames; accepting it shifts every sample
+    after it by one byte and turns the rest of the stream into noise."""
+    live = start()
+    r = client.post(f"/v1/audio/transcript/{live['id']}", content=b"\x01\x02\x03")
+    assert r.status_code == 400
+
+
+def test_a_full_transcript_stops_accepting_audio(ear):
+    live = transcript.begin("whisper", None)
+    live.seconds = transcript.LIMIT
+    r = client.post(f"/v1/audio/transcript/{live.id}", content=tone(1, 0.25))
+    assert r.status_code == 409
+
+
+def test_closing_twice_is_404(ear):
+    live = start()
+    assert client.delete(f"/v1/audio/transcript/{live['id']}").status_code == 200
+    assert client.delete(f"/v1/audio/transcript/{live['id']}").status_code == 404
+
+
+def test_abandoned_transcripts_are_collected(ear):
+    """A client that stops talking must not pin its audio in memory forever."""
+    live = transcript.begin("whisper", None)
+    live.push(tone(1, 0.5))
+    live._touched -= transcript.IDLE + 1
+    transcript.begin("whisper", None)  # collection happens on the way in
+    assert transcript.find(live.id) is None
+
+
+def test_samples_map_int16_onto_the_unit_range(ear):
+    """The model wants float in [-1, 1). Getting this wrong does not fail — it
+    transcribes quiet audio as silence and loud audio as noise."""
+    got = stt.samples(numpy.array([0, 16384, -32768], dtype="<i2").tobytes())
+    assert got.dtype == numpy.float32
+    assert list(got) == [0.0, 0.5, -1.0]
