@@ -57,3 +57,64 @@ jobs:
         run: |
           docker build -t "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}" .
           docker push "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}"
+
+      # THE ONLY STEP THAT DEPLOYS. cd.hanzo.ai does not watch the registry — it
+      # watches universe's values files, so an image that is built and pushed and
+      # never pinned is published and unreachable. This lane ended at "push" and
+      # relied on someone moving the pin by hand; 0.1.1 sat built while the fleet
+      # served 0.1.0 for exactly that reason.
+      #
+      # pin.sh resolves tag AND digest from ONE registry lookup and writes them
+      # together — two lookups at two moments drift, and drift here does not fail,
+      # it succeeds at doing nothing (the pod reports the new tag and runs the old
+      # bytes, because a reference carrying both resolves by digest).
+      - name: Ship it
+        env:
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_ORG: ${{ vars.KMS_ORG || 'hanzo' }}
+          KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
+          # pin.sh probes the registry before it moves anything; these let it read
+          # a private manifest instead of falling back to anonymous.
+          GHCR_USER: ${{ secrets.GHCR_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.v.outputs.version }}"
+
+          # Secrets come from KMS, never from a file or a repo variable.
+          KMS_TOKEN=$(curl -fsS "${KMS_ENDPOINT}/v1/kms/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"clientId\":\"${KMS_CLIENT_ID}\",\"clientSecret\":\"${KMS_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken // empty')
+          [ -n "$KMS_TOKEN" ] || { echo "::error::KMS login failed at ${KMS_ENDPOINT}"; exit 1; }
+
+          PIN_TOKEN=$(curl -fsS \
+            "${KMS_ENDPOINT}/v1/kms/orgs/${KMS_ORG}/secrets/deploy/UNIVERSE_PIN_TOKEN?env=${KMS_SECRET_ENV}" \
+            -H "Authorization: Bearer ${KMS_TOKEN}" | jq -r '.secret.value // empty')
+          [ -n "$PIN_TOKEN" ] || { echo "::error::UNIVERSE_PIN_TOKEN missing in KMS at ${KMS_ORG}/deploy (env ${KMS_SECRET_ENV})"; exit 1; }
+          echo "::add-mask::${PIN_TOKEN}"
+
+          # Shallow: universe is ~600MB of history and this needs one file from
+          # the tip.
+          git clone --quiet --depth 1 \
+            "https://x-access-token:${PIN_TOKEN}@git.hanzo.ai/hanzo/universe" /tmp/universe
+
+          # Another service can land its own pin between our clone and our push.
+          # That is a normal race, not a failure — but a shallow clone has no
+          # common history to rebase onto, so RE-APPLY rather than merge: reset to
+          # the new tip and pin again. Pinning is idempotent and derives
+          # everything from the file it finds.
+          for attempt in 1 2 3 4 5; do
+            /tmp/universe/charts/app/pin.sh speech "$VERSION"
+
+            if git -C /tmp/universe push --quiet origin HEAD:main 2>/dev/null; then
+              echo "pinned speech to ${VERSION}"; exit 0
+            fi
+
+            echo "universe moved under us (attempt ${attempt}/5) — re-applying on the new tip"
+            git -C /tmp/universe fetch --quiet --depth 1 origin main
+            git -C /tmp/universe reset --hard --quiet FETCH_HEAD
+          done
+          echo "::error::could not push the pin after 5 attempts"; exit 1
