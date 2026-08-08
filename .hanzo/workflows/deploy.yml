@@ -72,7 +72,7 @@ jobs:
         env:
           KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
           KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
-          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://kms.hanzo.ai' }}
+          KMS_ENDPOINT: ${{ vars.KMS_ENDPOINT || 'https://api.hanzo.ai' }}
           KMS_ORG: ${{ vars.KMS_ORG || 'hanzo' }}
           KMS_SECRET_ENV: ${{ vars.KMS_SECRET_ENV || 'prod' }}
           # pin.sh probes the registry before it moves anything; these let it read
@@ -91,8 +91,8 @@ jobs:
           [ -n "$KMS_TOKEN" ] || { echo "::error::KMS login failed at ${KMS_ENDPOINT}"; exit 1; }
 
           PIN_TOKEN=$(curl -fsS \
-            "${KMS_ENDPOINT}/v1/kms/orgs/${KMS_ORG}/secrets/deploy/UNIVERSE_PIN_TOKEN?env=${KMS_SECRET_ENV}" \
-            -H "Authorization: Bearer ${KMS_TOKEN}" | jq -r '.secret.value // empty')
+            "${KMS_ENDPOINT}/v1/kms/secrets/deploy/UNIVERSE_PIN_TOKEN?env=${KMS_SECRET_ENV}" \
+            -H "Authorization: Bearer ${KMS_TOKEN}" | jq -r '.value // empty')
           [ -n "$PIN_TOKEN" ] || { echo "::error::UNIVERSE_PIN_TOKEN missing in KMS at ${KMS_ORG}/deploy (env ${KMS_SECRET_ENV})"; exit 1; }
           echo "::add-mask::${PIN_TOKEN}"
 
