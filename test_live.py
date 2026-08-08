@@ -8,7 +8,7 @@ here is stubbed, so it fails if the model is not loaded, if raw audio is handed
 to it wrongly, or if the samples are scaled wrong.
 
 The audio is genuine speech, spoken by this service's own other half: kokoro says
-a sentence, ffmpeg renders it to exactly the shape a browser would send, and
+a sentence, it is resampled to exactly the shape a browser would send, and
 whisper has to say it back. A round trip through both halves needs no fixture in
 the tree and no recording of anyone's voice.
 
