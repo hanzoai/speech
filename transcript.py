@@ -45,9 +45,9 @@ WINDOW = 12.0  # past this the guard is dropped, so the window cannot grow forev
 IDLE = 30.0  # a session untouched this long is collectable
 LIMIT = 600.0  # audio one session will accept, in seconds
 
-# Decoding is CPU-bound, and the pool is exactly as wide as the model can really
-# serve (stt.PARALLEL). Wider is not more throughput — CTranslate2 serializes
-# calls on one model — it is only a longer queue in front of the same worker.
+# Decoding is CPU-bound, and the pool is exactly as wide as the model is told it
+# may run (stt.PARALLEL). Wider is not more throughput on a pod this size: past
+# the cores there are, it is only a longer queue in front of the same work.
 #
 # A pool, not a thread per session, for a second reason that is not about speed:
 # its workers are joined when the interpreter shuts down. Raw daemon threads are
@@ -139,10 +139,12 @@ class Transcript:
         started never returned. The two pool slots were then held by whichever
         sessions reached them first, for as long as those sessions kept receiving
         audio — which in a meeting is the whole meeting. Measured on three
-        concurrent sessions, one ran ZERO passes across its entire 70 s, returned
-        empty text, and was billed for every second of it. Its window was never
-        trimmed either, because the WINDOW cap lives in the pass that never ran:
-        69.9 s retained where the cap says 12.
+        concurrent sessions of the same length, the passes each one ran were 18,
+        ZERO and 19: the middle session returned empty text and was billed for
+        every second of its audio. Its window was never trimmed either, because
+        the WINDOW cap lives in the pass that never ran, so it retained every
+        second it had been given. With the hand-off the same three run 46, 46 and
+        46, and commit within a few percent of the same text.
 
         Standing down after one pass makes the pool's FIFO queue decide the order,
         so every session gets a turn.

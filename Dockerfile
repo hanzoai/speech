@@ -13,7 +13,7 @@ COPY main.py stt.py tts.py transcript.py vad.py ./
 # calls, so it needs no weights, and running it first means a contract break is
 # caught before 350MB is downloaded rather than after.
 FROM base AS test
-COPY test_speech.py ./
+COPY bench.py test_speech.py ./
 RUN uv sync --frozen --group dev && uv run pytest -q
 
 # Weights bake at BUILD: a deterministic image that boots without the network.

@@ -27,24 +27,26 @@ SECOND = RATE * WIDTH  # bytes of raw audio per second
 
 # How many decodes this process can really run at once.
 #
-# CTranslate2 SERIALIZES concurrent calls on one model, and `load` is cached, so a
-# thread pool sharing that model is not concurrency at all. Measured on the same
-# 8 s input: one decode 2.10 s, two concurrent 4.46 s (2.13x one), four concurrent
-# 9.95 s (4.74x one) — the pod ran one decode at a time and left three of its four
-# cores idle while sessions queued behind it. num_workers is what makes them
-# parallel, and it is worth 2.5x on a 4-core pod: 7.52 audio-seconds per
-# wall-second at four concurrent, against 3.03 for one worker.
+# Measured on four idle cores, audio-seconds decoded per wall-second, medians of
+# three interleaved rounds at 1, 2 and 4 concurrent sessions:
 #
-# cpu_threads is deliberately NOT set. Pinning it to a share of the pod was the
-# obvious next step and it is a LOSS at every level — 2.21 a/s where leaving it
-# alone gives 7.52, and 2x the CPU burned for less work, which is the signature of
-# threads spin-waiting on each other. CTranslate2 sizes its own pool better than
-# an arithmetic guess about cores, and the guess was wrong in the direction that
-# looks most reasonable.
+#   num_workers=1 (the default)   12.59   12.98   12.95
+#   num_workers=2                 12.72   12.71   12.81
+#   num_workers=4                 12.41   12.40   15.77
+#
+# Two things follow, and the first one is not what it looked like. The default
+# ALREADY scales across concurrent sessions — it does not serialize them — so
+# there was never a serialization defect here to fix, and num_workers=2 buys
+# nothing measurable. Four is worth taking because it is the only setting that
+# keeps full single-stream speed and also takes the best aggregate.
+#
+# cpu_threads is deliberately NOT set. Pinning it to a share of the pod is the
+# obvious next step, and it costs a THIRD of single-stream speed (8.45 against
+# 12.59) to buy 13-16% at concurrency. CTranslate2 sizes its own pool better than
+# an arithmetic guess about how many cores there are.
 #
 # PARALLEL lives here rather than with the pool because it is a property of the
-# MODEL. A pool wider than the model can serve is the illusion this is fixing, so
-# the pool takes its size from here rather than naming its own.
+# MODEL, and the pool takes its size from here rather than naming its own.
 PARALLEL = 4
 
 

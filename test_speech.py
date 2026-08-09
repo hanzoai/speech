@@ -12,6 +12,7 @@ import numpy
 import pytest
 from fastapi.testclient import TestClient
 
+import bench
 import main
 import stt
 import transcript
@@ -734,3 +735,41 @@ def test_no_session_is_starved_by_another(monkeypatch):
             time.sleep(0.005)
         else:
             raise AssertionError("a decode never stood down")
+
+
+# ── the capacity harness (bench.py) ─────────────────────────────────────────
+#
+# The harness answers "how far behind is the transcript", and a wrong answer
+# there is worse than no answer: it is a capacity number someone provisions
+# against. These check it against cases whose answer is known by construction —
+# a session keeping up, and a session that has stopped decoding entirely.
+
+def test_the_word_map_lands_on_the_seconds_it_was_built_from():
+    """Recognized words become a position in the audio, exactly at the ends and
+    exactly on repeat: the corpus is said once and tiled, so word N + all-words
+    must land one whole corpus later."""
+    sheet = bench.Sheet([(4, 2.0), (10, 5.0)], 5.0)
+    assert sheet.at(0) == 0.0
+    assert sheet.at(4) == 2.0
+    assert sheet.at(10) == 5.0
+    assert sheet.at(14) == 7.0  # one lap and four words
+    assert sheet.at(7) == pytest.approx(3.5)  # halfway through the second sentence
+
+
+def test_the_verdict_is_the_slope_and_a_stall_reads_as_one():
+    """The number a capacity claim rests on. A transcript that keeps up adds no
+    lag; one that has stopped adds a second of lag per second, which is 60 per
+    minute — and the flush at close must not be allowed to flatter it."""
+    keeping = [{"t": at, "heard_s": at - 2} for at in range(0, 600, 5)]
+    stalled = [{"t": at, "heard_s": 40.0} for at in range(0, 600, 5)]
+    assert bench.slope(keeping, 300) == pytest.approx(0.0, abs=0.01)
+    assert bench.slope(stalled, 300) == pytest.approx(60.0, abs=0.01)
+    assert bench.slope(stalled + [{"t": 601, "heard_s": 600, "shut": True}], 300) \
+        == pytest.approx(60.0, abs=0.01)
+
+
+def test_half_speed_reads_as_half_speed():
+    """Between the two ends the reading has to be proportional, or the knee it
+    reports is at the wrong concurrency."""
+    half = [{"t": at, "heard_s": at / 2} for at in range(0, 600, 5)]
+    assert bench.slope(half, 300) == pytest.approx(30.0, abs=0.01)
