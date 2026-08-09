@@ -45,10 +45,9 @@ WINDOW = 12.0  # past this the guard is dropped, so the window cannot grow forev
 IDLE = 30.0  # a session untouched this long is collectable
 LIMIT = 600.0  # audio one session will accept, in seconds
 
-# Decoding is CPU-bound and the pod is capped at 4 cores, so two at a time leaves
-# room for the request path to keep acking. Sessions beyond that queue rather than
-# thrash: more concurrent decodes than cores makes every session slower, not one
-# session faster.
+# Decoding is CPU-bound, and the pool is exactly as wide as the model can really
+# serve (stt.PARALLEL). Wider is not more throughput — CTranslate2 serializes
+# calls on one model — it is only a longer queue in front of the same worker.
 #
 # A pool, not a thread per session, for a second reason that is not about speed:
 # its workers are joined when the interpreter shuts down. Raw daemon threads are
@@ -56,8 +55,12 @@ LIMIT = 600.0  # audio one session will accept, in seconds
 # aborts the process — `terminate called without an active exception`, SIGABRT,
 # with every test passing and the run still red. In a pod that is a container
 # that cannot drain on SIGTERM.
-WORKERS = 2
-_pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="decode")
+#
+# THE QUEUE IS THE FAIRNESS. A pass is submitted, runs, and stands down, so the
+# order sessions are served in is the pool's FIFO order. A worker that looped
+# until its own window stopped growing never stood down under continuous audio,
+# and the slots were held by whichever sessions reached them first.
+_pool = ThreadPoolExecutor(max_workers=stt.PARALLEL, thread_name_prefix="decode")
 
 
 class Transcript:
@@ -129,23 +132,28 @@ class Transcript:
             self.pending = ""
 
     def _work(self) -> None:
-        """Decode the window until it stops growing, then stand down.
+        """Decode the window ONCE, then hand the worker back.
 
-        `_decoding` is cleared under the same lock that reads progress, so a push
-        that arrives at the moment the worker gives up still starts a new one.
+        It used to loop until the window stopped growing, and under continuous
+        audio that is never: new bytes always arrive mid-decode, so a worker that
+        started never returned. The two pool slots were then held by whichever
+        sessions reached them first, for as long as those sessions kept receiving
+        audio — which in a meeting is the whole meeting. Measured on three
+        concurrent sessions, one ran ZERO passes across its entire 70 s, returned
+        empty text, and was billed for every second of it. Its window was never
+        trimmed either, because the WINDOW cap lives in the pass that never ran:
+        69.9 s retained where the cap says 12.
+
+        Standing down after one pass makes the pool's FIFO queue decide the order,
+        so every session gets a turn.
         """
         try:
-            while True:
-                with self._lock:
-                    window, mark = bytes(self._window), self._got
-                    if self._closed or len(window) < FLOOR * stt.SECOND:
-                        self._decoding = False
-                        return
-                self._absorb(window)
-                with self._lock:
-                    if self._got == mark:
-                        self._decoding = False
-                        return
+            with self._lock:
+                window, mark = bytes(self._window), self._got
+                if self._closed or len(window) < FLOOR * stt.SECOND:
+                    self._decoding = False
+                    return
+            self._absorb(window)
         except BaseException:
             # The pool keeps a worker's exception inside its Future, and this one
             # is discarded — so without this the transcript simply stays empty
@@ -156,6 +164,18 @@ class Transcript:
             with self._lock:
                 self._decoding = False
             raise
+        # Audio that arrived DURING the pass is decoded on the next one, submitted
+        # from the BACK of the queue. The stand-down condition is unchanged — no
+        # new bytes since `mark` means there is nothing to decode again — so what
+        # differs is only that the worker is handed back between passes instead of
+        # held. `_decoding` stays true across the hand-off, so a push arriving
+        # right now does not start a second worker for this transcript: still one
+        # decode per session at a time.
+        with self._lock:
+            self._decoding = not self._closed and self._got != mark
+            again = self._decoding
+        if again:
+            _pool.submit(self._work)
 
     def _absorb(self, window: bytes) -> None:
         heard = stt.segments(self.model, window, self.language)

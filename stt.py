@@ -25,9 +25,28 @@ WIDTH = 2
 SECOND = RATE * WIDTH  # bytes of raw audio per second
 
 
+# How many decodes this process can really run at once, and what each one gets.
+#
+# CTranslate2 SERIALIZES concurrent calls on one model, and `load` is cached, so
+# a thread pool sharing that model is not concurrency at all. Measured on the same
+# 8 s input: one decode 2.10 s, two concurrent 4.46 s (2.13x one), four concurrent
+# 9.95 s (4.74x one) — the pod ran one decode at a time and left three of its four
+# cores idle while sessions queued behind it. num_workers is what makes them
+# parallel; cpu_threads is what each one gets. 2 x 2 fills a 4-core pod exactly.
+#
+# They live here rather than with the pool because they are properties of the
+# MODEL. A pool wider than the model can serve is the illusion this is fixing, so
+# the pool takes its size from PARALLEL rather than naming its own.
+PARALLEL = 2
+THREADS = 2
+
+
 @lru_cache(maxsize=None)
 def load(model: str) -> WhisperModel:
-    return WhisperModel(MODELS[model], device="cpu", compute_type="int8")
+    return WhisperModel(
+        MODELS[model], device="cpu", compute_type="int8",
+        cpu_threads=THREADS, num_workers=PARALLEL,
+    )
 
 
 def samples(pcm: bytes) -> numpy.ndarray:

@@ -5,6 +5,7 @@ and meters every caller before a request reaches this service; a provider row
 pointing at http://speech.hanzo.svc/v1 is the whole integration.
 """
 
+import os
 import time
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -57,6 +58,19 @@ class Open(BaseModel):
     channels: int = 1
 
 
+# Where THIS process answers. A growing transcript is a window held in one
+# process's memory, so every push after the first has exactly one server that can
+# take it — and a Service address round-robins per connection, which sends half of
+# them to a replica that has never heard of the session.
+#
+# So `open` says where it lives and the caller addresses that pod for the rest of
+# the session. Empty when POD_IP is unset, which is the honest answer for a single
+# process: there is nothing to pin to, and the caller keeps the address it has.
+# The deployment sets it from the downward API; with more than one replica it is
+# not optional, and TestOpenNamesWhereItLives is what says so.
+HERE = f"http://{os.environ['POD_IP']}:{os.getenv('PORT', '8000')}" if os.getenv("POD_IP") else ""
+
+
 # ── the streaming sibling of /v1/audio/transcriptions ───────────────────────
 #
 # Half duplex over ordinary HTTP: the client POSTs a chunk of audio and the
@@ -86,6 +100,7 @@ def transcript_open(ask: Open):
     live = transcript.begin(ask.model, ask.language)
     return {
         "id": live.id,
+        "at": HERE,
         "model": live.model,
         "format": "pcm16",
         "rate": stt.RATE,

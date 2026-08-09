@@ -641,3 +641,96 @@ def test_the_ack_reports_zero_for_silence(ear, room):
     assert r.json()["seconds"] == 0.0
 
 
+# ── which process owns the session ──────────────────────────────────────────
+
+def test_open_names_where_it_lives(ear, monkeypatch):
+    """A growing transcript lives in ONE process's memory, and a Service address
+    round-robins per connection — so with two replicas half the pushes land on a
+    replica that has never heard of the session and answer 404. `open` says which
+    pod took it, and the caller addresses that pod for the rest of the session.
+
+    Both directions are asserted: set, it is a real address; unset, it is empty
+    rather than a guess, which is the honest answer for a single process."""
+    import importlib
+
+    monkeypatch.setenv("POD_IP", "10.244.3.17")
+    monkeypatch.setenv("PORT", "8000")
+    here = importlib.reload(main)
+    assert here.HERE == "http://10.244.3.17:8000"
+
+    monkeypatch.delenv("POD_IP")
+    nowhere = importlib.reload(main)
+    assert nowhere.HERE == ""
+    # And the field is on the open response, not merely computed.
+    assert "at" in nowhere.transcript_open(nowhere.Open(model="whisper"))
+
+
+# ── fairness: every session gets a turn ─────────────────────────────────────
+
+def test_no_session_is_starved_by_another(monkeypatch):
+    """A worker used to loop until its OWN window stopped growing, which under
+    continuous audio is never — new bytes always arrive mid-decode. The pool's
+    slots were then held by whichever sessions reached them first, for as long as
+    those sessions kept receiving audio, which in a meeting is the whole meeting.
+
+    Measured on the real decoder with three concurrent sessions, one ran ZERO
+    passes across its entire 70 s: it returned empty text and was billed for every
+    second of it, and its window grew to 69.9 s because the WINDOW cap lives in
+    the pass that never ran.
+
+    The decode here is SLOW on purpose. With an instant one the pool is never
+    contended and every policy looks fair.
+    """
+    import collections
+    import threading
+
+    seen = collections.Counter()
+    guard = threading.Lock()
+
+    def slow(model, pcm, language):
+        with guard:
+            seen[pcm[:1]] += 1  # each session pushes its own marker byte
+        time.sleep(0.06)
+        return []
+
+    monkeypatch.setattr(stt, "segments", slow)
+
+    sessions = [transcript.begin("whisper", None) for _ in range(3)]
+    marks = [bytes([7 + i]) for i in range(len(sessions))]
+    chunk = int(FLOOR_BYTES := 1.0 * stt.SECOND)  # one FLOOR of audio per push
+
+    stop = time.monotonic() + 2.0
+
+    def feed(live, mark):
+        while time.monotonic() < stop:
+            live.push(mark * chunk)
+            time.sleep(0.02)
+
+    threads = [threading.Thread(target=feed, args=(s, m)) for s, m in zip(sessions, marks)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Asserted while the audio is still arriving, not after everything drains:
+    # the question is whether a session gets served DURING a busy call, not
+    # whether it is served eventually once the others stop.
+    starved = [i for i, m in enumerate(marks) if seen[m] == 0]
+    assert not starved, f"sessions {starved} ran zero decode passes while the others ran {dict(seen)}"
+
+    # Quiesce before the patch is undone. A pass still queued when `slow` is
+    # removed would run against the REAL decoder and pull weights off the network
+    # in the middle of the suite.
+    for live in sessions:
+        with live._lock:
+            live._closed = True
+        transcript.drop(live.id)
+    end = time.monotonic() + 5.0
+    for live in sessions:
+        while time.monotonic() < end:
+            with live._lock:
+                if not live._decoding:
+                    break
+            time.sleep(0.005)
+        else:
+            raise AssertionError("a decode never stood down")
