@@ -4,7 +4,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
-COPY main.py stt.py tts.py transcript.py ./
+COPY main.py stt.py tts.py transcript.py vad.py ./
 
 # The gate, as a build stage. `docker build` is the ONE thing this lane is
 # already known to do, so the test needs no uv on the runner and no bind mount

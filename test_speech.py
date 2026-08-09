@@ -16,6 +16,7 @@ import main
 import stt
 import transcript
 import tts
+import vad
 
 client = TestClient(main.app)
 
@@ -474,3 +475,169 @@ def test_a_failed_decode_says_so(monkeypatch, caplog):
         settle(live)
     assert "decoder is unhappy" in caplog.text
     assert live.text == "" and live.pending == ""
+
+
+# ── voice activity: the decode that never runs ──────────────────────────────
+#
+# Silero is a weight like every other, so it is replaced here and what runs is
+# the squelch's own arithmetic — the two thresholds, the hangover, the lead-in.
+# Everything above this line is about the decode window, so everything above
+# this line gets a room that hears a voice in all of it and is untouched.
+
+
+@pytest.fixture(autouse=True)
+def talking(monkeypatch):
+    monkeypatch.setattr(
+        vad, "get_vad_model",
+        lambda: lambda heard: numpy.ones((len(heard) // vad.STEP, 1)),
+    )
+
+
+class _Room:
+    """silero's shape: one probability per window, read from how loud that window
+    is — so a test writes speech and silence as loud and quiet audio, and the
+    machine that decides between them is the real one."""
+
+    def __call__(self, heard):
+        return numpy.abs(heard.reshape(-1, vad.STEP)).max(axis=1).reshape(-1, 1)
+
+
+@pytest.fixture
+def room(monkeypatch):
+    monkeypatch.setattr(vad, "get_vad_model", _Room)
+
+
+def loud(seconds: float) -> bytes:
+    return tone(30000, seconds)  # 0.92 of full scale
+
+
+def quiet(seconds: float) -> bytes:
+    return tone(3, seconds)  # 0.0001 — a room with nobody in it
+
+
+def test_a_quiet_room_costs_nothing(ear, room):
+    """The whole point. Silence decodes to "" for the same CPU and the same money
+    as speech, so an attendant left in an empty room bills a tenant continuously
+    for nothing. Dropped audio must reach neither the decoder nor the meter."""
+    live = transcript.begin("whisper", None)
+    billed = sum(live.push(quiet(0.25)) for _ in range(12))  # 3 s of nobody
+
+    assert billed == 0.0, "silence must not be billed"
+    assert live.seconds == 0.0
+    assert ear.spans == [], "and must not reach the decoder at all"
+    assert len(live._window) == 0
+
+
+def test_a_voice_is_decoded(ear, room):
+    """The other direction, which is what makes the test above mean anything: a
+    squelch that dropped everything would satisfy that one perfectly."""
+    live = transcript.begin("whisper", None)
+    billed = sum(live.push(loud(0.25)) for _ in range(8))
+    settle(live)
+
+    assert billed == pytest.approx(2.0)
+    assert ear.spans, "speech must reach the decoder"
+
+
+def test_the_onset_that_opened_the_squelch_is_decoded_with_it(ear, room):
+    """The classic failure, and the one that costs more than it saves: a voice is
+    not detected until it is already under way, so a squelch that begins at the
+    trigger has already eaten the first syllable. The audio from before the
+    trigger is kept, and handed over by the push that opens."""
+    live = transcript.begin("whisper", None)
+    for _ in range(8):
+        assert live.push(quiet(0.25)) == 0.0
+
+    opened = live.push(loud(0.25))
+
+    assert opened > 0.25, "the push that opens carries more than itself"
+    assert bytes(live._window[-len(loud(0.25)):]) == loud(0.25)
+    before = bytes(live._window[:-len(loud(0.25))])
+    assert before == quiet(len(before) / stt.SECOND), "and what precedes it is what preceded"
+    assert len(before) == int(vad.LEAD * stt.SECOND), "as much of it as LEAD says"
+    assert opened == pytest.approx(len(live._window) / stt.SECOND), "all of it billed once"
+
+
+def test_a_pause_inside_a_sentence_does_not_end_it(ear, room):
+    """Speech is not continuous: there is a gap between words and a breath
+    between clauses. Closing on the first quiet window would chop a sentence into
+    fragments and clip the word after every pause."""
+    live = transcript.begin("whisper", None)
+    live.push(loud(0.25))
+    gap = [live.push(quiet(0.25)) for _ in range(2)]  # half a second
+    after = live.push(loud(0.25))
+
+    assert gap == [0.25, 0.25], "a pause this short is inside the sentence"
+    assert after == 0.25, "so the word after it needs no lead-in — it never closed"
+
+
+def test_the_squelch_closes_once_the_room_stays_quiet(ear, room):
+    """And it must actually close, or the saving is only ever deferred. The
+    hangover is spent — HANG seconds of quiet decode — and then nothing does."""
+    live = transcript.begin("whisper", None)
+    live.push(loud(0.25))
+    after = [live.push(quiet(0.25)) for _ in range(8)]  # 2 s of nobody
+
+    spent = sum(after)
+    assert spent == pytest.approx(0.75), "the hangover, and no more than it"
+    assert spent <= vad.HANG
+    assert after[3:] == [0.0] * 5, "quiet from there on is free"
+
+
+def test_a_session_never_bills_a_second_it_did_not_decode(ear, room):
+    """The invariant that makes the lead-in safe to charge for: the push that
+    opens reports more than its own length, so the arithmetic has to hold over
+    the session rather than over one call. Every second billed is a second a
+    decoder read, and no second is billed twice."""
+    live = transcript.begin("whisper", None)
+    sent = billed = 0.0
+    for piece in (quiet(1.0), loud(1.0), quiet(1.0), loud(1.0), quiet(2.0)):
+        for at in range(0, len(piece), transcript.CHUNK):
+            billed += live.push(piece[at:at + transcript.CHUNK])
+            sent += len(piece[at:at + transcript.CHUNK]) / stt.SECOND
+
+    assert billed == pytest.approx(live.seconds), "the acks and the session agree"
+    assert live.seconds == pytest.approx(live._got / stt.SECOND), "billed is decoded"
+    assert billed < sent, "and the quiet room was not charged for"
+
+
+class _Level:
+    """A room at one stated probability — it reads the level, not the audio — so
+    a test can write the window silero is least sure about."""
+
+    def __init__(self):
+        self.p = 0.0
+
+    def __call__(self, heard):
+        return numpy.full((len(heard) // vad.STEP, 1), self.p)
+
+
+def test_a_window_the_model_is_unsure_of_holds_its_ground(monkeypatch):
+    """Between the two thresholds silero is not sure, and one threshold cannot
+    express that: the same probability must continue speech without being able to
+    begin it. With one threshold, a syllable fading through it ends the sentence
+    and a room's own hum starts one."""
+    level = _Level()
+    monkeypatch.setattr(vad, "get_vad_model", lambda: level)
+    squelch = vad.Squelch()
+
+    level.p = (vad.OPEN + vad.SHUT) / 2
+    assert squelch.admit(tone(1, 0.25)) == b"", "unsure does not begin speech"
+
+    level.p = vad.OPEN
+    assert squelch.admit(tone(1, 0.25)), "certain does"
+
+    level.p = (vad.OPEN + vad.SHUT) / 2
+    assert squelch.admit(tone(1, 2.0)), "and unsure does not end it, however long"
+
+
+def test_the_ack_reports_zero_for_silence(ear, room):
+    """`duration` on the ack is the field the ai plane meters. Whatever the
+    session believes, this is the number that becomes money."""
+    live = start()
+    r = client.post(f"/v1/audio/transcript/{live['id']}", content=quiet(0.25))
+    assert r.status_code == 200, r.text
+    assert r.json()["duration"] == 0.0
+    assert r.json()["seconds"] == 0.0
+
+

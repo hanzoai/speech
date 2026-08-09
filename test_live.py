@@ -171,3 +171,90 @@ def test_the_batch_route_still_reports_a_real_duration(said):
     assert r.status_code == 200, r.text
     assert r.json()["duration"] == pytest.approx(len(said) / stt.SECOND, abs=0.1)
     assert "fox" in r.json()["text"].lower()
+
+
+# ── voice activity, against the real detector ───────────────────────────────
+#
+# test_speech.py replaces silero, because the squelch's arithmetic is what those
+# tests are about. What it cannot tell is whether the real model agrees with the
+# real room: whether a fan is silence and a word is not.
+
+TURNS = ("Right, so the migration landed yesterday and the error rate is flat.",
+         "Kubernetes rescheduled the workers twice overnight.")
+
+
+def tone(seconds: float, dbfs: float = -45.0) -> bytes:
+    """Room tone: a fan, a laptop, an open microphone in an empty room. Digital
+    silence is a fixture no detector can fail, so this is not that — it is noise
+    at a level a meeting really carries."""
+    rng = numpy.random.default_rng(5)
+    n = int(seconds * stt.RATE)
+    warm = numpy.convolve(rng.standard_normal(n), numpy.ones(16) / 16, mode="same")
+    return pcm(warm / (numpy.abs(warm).max() or 1.0) * 10 ** (dbfs / 20.0))
+
+
+def pcm(x: numpy.ndarray) -> bytes:
+    return (numpy.clip(x, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
+def feed(live, audio: bytes) -> float:
+    return sum(live.push(audio[at:at + transcript.CHUNK])
+               for at in range(0, len(audio), transcript.CHUNK))
+
+
+@pytest.fixture(scope="module")
+def meeting() -> bytes:
+    """A meeting: a lull, a turn, a pause inside it, another turn, a lull."""
+    parts = [tone(2.5), speech(TURNS[0]), tone(0.5), speech(TURNS[1]), tone(2.5)]
+    return b"".join(parts)
+
+
+def test_an_empty_room_is_never_decoded(said):
+    """The whole point, against the real detector. Six seconds of a room with
+    nobody in it must cost nothing: no bytes to the decoder, no seconds to the
+    bill. Then the same session hears a voice and pays for it — without which
+    this test is also passed by a service that has stopped working."""
+    live = transcript.begin("whisper", "en")
+
+    assert feed(live, tone(6.0)) == 0.0, "a room with nobody in it is free"
+    assert live.seconds == 0.0
+    assert live._got == 0, "and reaches the decoder not at all"
+
+    assert feed(live, said) > 0.0, "and a voice in the same room does not"
+
+
+def test_a_push_carrying_no_audio_is_answered_not_refused():
+    """The route takes whatever body arrives, and an empty one is whole int16
+    frames and under the ceiling — so it reaches the squelch, and silero cannot
+    be asked about nothing: it indexes the last window of what it is given, and
+    of nothing there is none. A push with no audio was a no-op before there was
+    anything in front of the decoder and it stays one, which is also how a client
+    reads the newest text without sending more.
+
+    It lives here rather than with the fast tests because only the real model
+    has that edge — a stand-in answers an empty array quite happily, and a suite
+    that only ever sees the stand-in passes either way."""
+    live = client.post("/v1/audio/transcript", json={"model": "whisper"})
+    tid = live.json()["id"]
+    r = client.post(f"/v1/audio/transcript/{tid}", content=b"")
+    assert r.status_code == 200, r.text
+    assert r.json()["duration"] == 0.0
+
+
+def test_the_word_after_a_pause_is_still_there(meeting):
+    """The failure that would make this a bad trade: a squelch that opens on the
+    trigger has already eaten the syllable that triggered it. Every word must
+    survive a meeting made of turns, pauses and lulls — read back through the
+    real decoder, which is the only judge of whether a syllable was lost."""
+    live = transcript.begin("whisper", "en")
+    billed = feed(live, meeting)
+    live.close()
+
+    heard = live.text.lower()
+    said = " ".join(TURNS).lower()
+    missing = [w.strip(".,") for w in said.split() if w.strip(".,") not in heard]
+    assert not missing, f"the squelch lost {missing}; heard {heard!r}"
+
+    sent = len(meeting) / stt.SECOND
+    assert billed < sent, "and the lulls were not charged for"
+    assert billed == pytest.approx(live.seconds)

@@ -13,9 +13,13 @@ latency lands on a later ack instead of on this one. One decode runs per session
 at a time, which is also what stops a fast pusher from queueing work faster than
 the CPU retires it.
 
-`seconds` is arithmetic on the bytes received, so it is the audio submitted,
-exactly, and it cannot silently become zero: it is the same quantity `transcribe`
-reports as `duration`, measured the same way, and it is what the call is billed on.
+Audio reaches the window through a squelch, so a quiet room reaches nothing at
+all: no bytes, no decode, no charge. `seconds` is arithmetic on the bytes that
+got through, and those are exactly the bytes a decoder read — so the bill is the
+audio we listened to. It is the same quantity `transcribe` reports as `duration`,
+measured the same way, it can never exceed the audio submitted, and it cannot
+silently become zero for audio that WAS decoded, because it is the length of the
+decoded bytes and nothing else.
 """
 
 import logging
@@ -25,6 +29,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import stt
+import vad
 
 log = logging.getLogger(__name__)
 
@@ -64,9 +69,10 @@ class Transcript:
         self.language = language
         self.text = ""  # committed: settled, never revised
         self.pending = ""  # the open tail: newest decode, may still change
-        self.seconds = 0.0  # audio received — the billable quantity
+        self.seconds = 0.0  # audio decoded — the billable quantity
         self._window = bytearray()
         self._got = 0  # bytes ever received; marks progress for the worker
+        self._voice = vad.Squelch()
         self._lock = threading.Lock()
         self._decoding = False
         self._closed = False
@@ -80,23 +86,34 @@ class Transcript:
         return now - self._touched > IDLE
 
     def push(self, pcm: bytes) -> float:
-        """Accept audio; return the seconds THIS push carried.
+        """Accept audio; return the seconds THIS push put in front of a decoder.
 
-        The return value is the metered quantity for this call — per push, not
-        cumulative, so summing the pushes of a session yields the audio submitted
-        once and only once.
+        That is the metered quantity for this call — per push, not cumulative, so
+        summing the pushes of a session yields the audio decoded once and only
+        once. A push the squelch drops returns 0.0: it was never decoded, so
+        there is nothing to charge for. A push that OPENS the squelch carries the
+        lead-in with it and so reports more than its own length; those seconds
+        were withheld from every earlier push, so the session still bills each
+        second at most once and never bills one it did not decode.
+
+        The squelch runs under the lock because its memory of the room is part of
+        the session's state, and it is a millisecond of arithmetic — no decode
+        ever holds this lock.
         """
         with self._lock:
-            self._window += pcm
-            self._got += len(pcm)
-            self.seconds += len(pcm) / stt.SECOND
             self._touched = time.monotonic()
+            heard = self._voice.admit(pcm)
+            if not heard:
+                return 0.0
+            self._window += heard
+            self._got += len(heard)
+            self.seconds += len(heard) / stt.SECOND
             start = not self._decoding and len(self._window) >= FLOOR * stt.SECOND
             if start:
                 self._decoding = True
         if start:
             _pool.submit(self._work)
-        return len(pcm) / stt.SECOND
+        return len(heard) / stt.SECOND
 
     def close(self) -> None:
         """Decode what is left and commit all of it — nothing follows, so nothing
