@@ -25,28 +25,32 @@ WIDTH = 2
 SECOND = RATE * WIDTH  # bytes of raw audio per second
 
 
-# How many decodes this process can really run at once, and what each one gets.
+# How many decodes this process can really run at once.
 #
-# CTranslate2 SERIALIZES concurrent calls on one model, and `load` is cached, so
-# a thread pool sharing that model is not concurrency at all. Measured on the same
+# CTranslate2 SERIALIZES concurrent calls on one model, and `load` is cached, so a
+# thread pool sharing that model is not concurrency at all. Measured on the same
 # 8 s input: one decode 2.10 s, two concurrent 4.46 s (2.13x one), four concurrent
 # 9.95 s (4.74x one) — the pod ran one decode at a time and left three of its four
 # cores idle while sessions queued behind it. num_workers is what makes them
-# parallel; cpu_threads is what each one gets. 2 x 2 fills a 4-core pod exactly.
+# parallel, and it is worth 2.5x on a 4-core pod: 7.52 audio-seconds per
+# wall-second at four concurrent, against 3.03 for one worker.
 #
-# They live here rather than with the pool because they are properties of the
+# cpu_threads is deliberately NOT set. Pinning it to a share of the pod was the
+# obvious next step and it is a LOSS at every level — 2.21 a/s where leaving it
+# alone gives 7.52, and 2x the CPU burned for less work, which is the signature of
+# threads spin-waiting on each other. CTranslate2 sizes its own pool better than
+# an arithmetic guess about cores, and the guess was wrong in the direction that
+# looks most reasonable.
+#
+# PARALLEL lives here rather than with the pool because it is a property of the
 # MODEL. A pool wider than the model can serve is the illusion this is fixing, so
-# the pool takes its size from PARALLEL rather than naming its own.
-PARALLEL = 2
-THREADS = 2
+# the pool takes its size from here rather than naming its own.
+PARALLEL = 4
 
 
 @lru_cache(maxsize=None)
 def load(model: str) -> WhisperModel:
-    return WhisperModel(
-        MODELS[model], device="cpu", compute_type="int8",
-        cpu_threads=THREADS, num_workers=PARALLEL,
-    )
+    return WhisperModel(MODELS[model], device="cpu", compute_type="int8", num_workers=PARALLEL)
 
 
 def samples(pcm: bytes) -> numpy.ndarray:
