@@ -14,7 +14,7 @@ COPY main.py stt.py tts.py transcript.py vad.py ./
 # caught before 350MB is downloaded rather than after.
 FROM base AS test
 COPY bench.py test_speech.py ./
-RUN uv sync --frozen --group dev && uv run pytest -q
+RUN uv sync --frozen --group dev && uv run pytest -q test_speech.py
 
 # Weights bake at BUILD: a deterministic image that boots without the network.
 FROM base AS weights
@@ -30,9 +30,15 @@ RUN uv run python -c "import stt; [stt.load(m) for m in stt.MODELS]" \
 #
 # It sits above `final` and below nothing: `final` does not depend on it, so an
 # untargeted `docker build` still produces the image WITHOUT dev dependencies.
+# Each gate runs its OWN suite, and naming it here is what keeps that true. This
+# stage used to copy test_speech.py too and then run a bare `pytest -q`, which
+# collected both files — so the stubbed suite ran a second time, proving nothing
+# it had not already proven above, while the list of files it needed had to be
+# maintained in two places. bench.py was added to one of them and not the other,
+# and the build stopped at `ModuleNotFoundError: No module named 'bench'`.
 FROM weights AS live
-COPY test_speech.py test_live.py ./
-RUN uv sync --frozen --group dev && uv run pytest -q
+COPY test_live.py ./
+RUN uv sync --frozen --group dev && uv run pytest -q test_live.py
 
 FROM weights AS final
 EXPOSE 8000
