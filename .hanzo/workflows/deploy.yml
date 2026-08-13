@@ -92,14 +92,34 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.v.outputs.version }}"
 
+          # ASK AGAIN. api.hanzo.ai serves KMS from a single replica on a
+          # ReadWriteOnce volume, so only one pod can hold it and every deploy of
+          # that service is a minute or so of 503. A release landing in that window
+          # used to publish its image and then strand it: 0.1.10 built and pushed
+          # green, this step took one 503, and the newest image sat in the registry
+          # unreferenced while the cluster ran 0.1.6 — the exact failure pin.sh
+          # exists to end, arriving one step earlier than the one it guards.
+          #
+          # Reading a secret is idempotent, so asking again costs nothing and is
+          # the whole fix. Six tries over ~100s outlasts a rollout; a KMS that is
+          # genuinely down still fails, and says so.
+          kms() {
+            for attempt in 1 2 3 4 5 6; do
+              if out=$(curl -fsS --max-time 30 "$@" 2>/dev/null); then printf '%s' "$out"; return 0; fi
+              echo "  KMS did not answer (attempt ${attempt}/6) — retrying" >&2
+              sleep 20
+            done
+            return 1
+          }
+
           # Secrets come from KMS, never from a file or a repo variable.
-          KMS_TOKEN=$(curl -fsS "${KMS_ENDPOINT}/v1/kms/auth/login" \
+          KMS_TOKEN=$(kms "${KMS_ENDPOINT}/v1/kms/auth/login" \
             -H 'Content-Type: application/json' \
             -d "{\"clientId\":\"${KMS_CLIENT_ID}\",\"clientSecret\":\"${KMS_CLIENT_SECRET}\"}" \
             | jq -r '.accessToken // empty')
           [ -n "$KMS_TOKEN" ] || { echo "::error::KMS login failed at ${KMS_ENDPOINT}"; exit 1; }
 
-          PIN_TOKEN=$(curl -fsS \
+          PIN_TOKEN=$(kms \
             "${KMS_ENDPOINT}/v1/kms/secrets/deploy/UNIVERSE_PIN_TOKEN?env=${KMS_SECRET_ENV}" \
             -H "Authorization: Bearer ${KMS_TOKEN}" | jq -r '.value // empty')
           [ -n "$PIN_TOKEN" ] || { echo "::error::UNIVERSE_PIN_TOKEN missing in KMS at ${KMS_ORG}/deploy (env ${KMS_SECRET_ENV})"; exit 1; }
