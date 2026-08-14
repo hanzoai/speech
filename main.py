@@ -30,8 +30,51 @@ def models():
     return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "hanzo"} for n in names]}
 
 
+# What a caller may ask to be timed, and OpenAI's two names for it.
+GRANULARITIES = {"word", "segment"}
+
+
+def granularities(form) -> set[str]:
+    """`timestamp_granularities`, either spelling.
+
+    OpenAI's own SDKs encode a multipart array with a bracketed name and
+    hand-rolled clients almost always send the bare one. Both mean the same
+    thing, so both are read here — in ONE place — rather than leaving half the
+    clients silently untimed.
+    """
+    asked = {*form.getlist("timestamp_granularities[]"), *form.getlist("timestamp_granularities")}
+    unknown = asked - GRANULARITIES
+    if unknown:
+        raise HTTPException(
+            400,
+            f"unknown timestamp_granularities {sorted(unknown)}; "
+            f"supported: {', '.join(sorted(GRANULARITIES))}",
+        )
+    return asked
+
+
+def timed_word(w) -> dict:
+    return {"word": w.word.strip(), "start": w.start, "end": w.end}
+
+
+def timed_segment(s) -> dict:
+    return {
+        "id": s.id,
+        "seek": s.seek,
+        "start": s.start,
+        "end": s.end,
+        "text": s.text.strip(),
+        "tokens": list(s.tokens),
+        "temperature": s.temperature,
+        "avg_logprob": s.avg_logprob,
+        "compression_ratio": s.compression_ratio,
+        "no_speech_prob": s.no_speech_prob,
+    }
+
+
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(
+    request: Request,
     file: UploadFile = File(...),
     model: str = Form("whisper"),
     language: str | None = Form(None),
@@ -39,15 +82,32 @@ async def transcriptions(
 ):
     if model not in stt.MODELS:
         raise HTTPException(404, f"unknown model {model!r}")
-    text, duration = stt.transcribe(model, await file.read(), language)
+    asked = granularities(await request.form())
+    # Timings ride the verbose body and nowhere else, so asking for them
+    # alongside a body that cannot carry them is a mistake worth naming: the
+    # alternative is charging for the alignment pass and then discarding it.
+    if asked and response_format != "verbose_json":
+        raise HTTPException(400, "timestamp_granularities requires response_format=verbose_json")
+    want = asked or {"segment"}  # OpenAI's default granularity
+    text, duration, heard = stt.transcribe(model, await file.read(), language, words="word" in want)
     if response_format == "text":
         return Response(text, media_type="text/plain")
+    # Plain json stays {"text"} so a client reading the standard shape is
+    # unaffected.
+    if response_format != "verbose_json":
+        return JSONResponse({"text": text})
     # verbose_json carries `duration`, exactly as OpenAI's does — and the ai
-    # plane asks for it because that duration is what meters the call. Plain
-    # json stays {"text"} so a client reading the standard shape is unaffected.
-    if response_format == "verbose_json":
-        return JSONResponse({"text": text, "duration": duration})
-    return JSONResponse({"text": text})
+    # plane asks for it because that duration is what meters the call. It
+    # carries the timings too: the decode already knew where every segment
+    # started and stopped, and dropping that on the floor is what left every
+    # caption in the estate cutting on lines it had to invent word boundaries
+    # inside.
+    body = {"task": "transcribe", "duration": duration, "text": text}
+    if "segment" in want:
+        body["segments"] = [timed_segment(s) for s in heard]
+    if "word" in want:
+        body["words"] = [timed_word(w) for s in heard for w in (s.words or ())]
+    return JSONResponse(body)
 
 
 class Open(BaseModel):

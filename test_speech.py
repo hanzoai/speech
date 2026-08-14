@@ -22,14 +22,41 @@ import vad
 client = TestClient(main.app)
 
 
+class _Word:
+    def __init__(self, word, start, end):
+        self.word, self.start, self.end = word, start, end
+
+
+class _Timed:
+    """A faster-whisper Segment, reduced to the fields the body is shaped from."""
+    id = 0
+    seek = 0
+    tokens = (50364, 264)
+    temperature = 0.0
+    avg_logprob = -0.31
+    compression_ratio = 1.2
+    no_speech_prob = 0.01
+
+    def __init__(self, text, start, end, words=None):
+        self.text, self.start, self.end, self.words = text, start, end, words
+
+
+WORDS = [_Word(" the", 0.0, 0.24), _Word(" quick", 0.24, 0.58),
+         _Word(" brown", 0.58, 0.91), _Word(" fox", 0.91, 1.32)]
+
+
 @pytest.fixture
 def heard(monkeypatch):
-    """Stub the transcriber; record the call, return a known text + duration."""
+    """Stub the transcriber; record the call, return a known text, duration and
+    segments. `words` is echoed back so a test can prove the alignment pass is
+    asked for only when the caller wanted word timings."""
     calls = {}
 
-    def fake(model, audio, language):
-        calls.update(model=model, audio=audio, language=language)
-        return "the quick brown fox", 12.5
+    def fake(model, audio, language, words=False):
+        calls.update(model=model, audio=audio, language=language, words=words)
+        return "the quick brown fox", 12.5, [
+            _Timed(" the quick brown fox ", 0.0, 1.32, WORDS if words else None)
+        ]
 
     monkeypatch.setattr(stt, "transcribe", fake)
     return calls
@@ -58,7 +85,8 @@ def test_verbose_json_carries_duration(heard):
         data={"model": "whisper", "response_format": "verbose_json"},
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"text": "the quick brown fox", "duration": 12.5}
+    assert r.json()["duration"] == 12.5
+    assert r.json()["text"] == "the quick brown fox"
 
 
 def test_plain_json_is_unchanged(heard):
@@ -80,6 +108,82 @@ def test_text_format_returns_plain_text(heard):
     )
     assert r.text == "the quick brown fox"
     assert r.headers["content-type"].startswith("text/plain")
+
+
+# ── STT: a caption cuts on a word, so the words have to survive ─────────────
+
+def _post(gran=None, fmt="verbose_json", field="timestamp_granularities[]"):
+    data = {"model": "whisper", "response_format": fmt}
+    if gran is not None:
+        data[field] = gran
+    return client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data=data,
+    )
+
+
+def test_word_granularity_returns_word_timings(heard):
+    """The defect: nothing in the estate could time a caption to a word. The
+    service heard every word boundary and returned only the joined text, so
+    every consumer divided a line's span by its letters and drifted."""
+    body = _post(gran=["word"]).json()
+    assert [w["word"] for w in body["words"]] == ["the", "quick", "brown", "fox"]
+    assert [w["start"] for w in body["words"]] == [0.0, 0.24, 0.58, 0.91]
+    assert [w["end"] for w in body["words"]] == [0.24, 0.58, 0.91, 1.32]
+
+
+def test_word_granularity_asks_the_model_to_align(heard):
+    """Word timings are a second pass over the cross-attention, not a field that
+    was lying around. Shaping a `words` array without turning alignment on would
+    return an empty one and look like the model had nothing to say."""
+    _post(gran=["word"])
+    assert heard["words"] is True
+
+
+def test_segments_cost_nothing_so_they_are_the_default(heard):
+    """OpenAI's default granularity is segment, and the decode already produced
+    them — so verbose_json carries segments without being asked, and without
+    paying for alignment."""
+    body = _post().json()
+    assert heard["words"] is False, "no alignment pass when nobody asked for words"
+    assert "words" not in body
+    seg = body["segments"][0]
+    assert (seg["start"], seg["end"]) == (0.0, 1.32)
+    assert seg["text"] == "the quick brown fox", "segment text is stripped"
+    assert seg["no_speech_prob"] == 0.01, "the decode's own confidence rides along"
+
+
+def test_both_granularities_together(heard):
+    body = _post(gran=["word", "segment"]).json()
+    assert len(body["words"]) == 4 and len(body["segments"]) == 1
+
+
+def test_either_spelling_of_the_array_is_read(heard):
+    """OpenAI's SDKs send timestamp_granularities[]; hand-rolled clients send the
+    bare name. Reading only one is half the callers silently untimed."""
+    for field in ("timestamp_granularities[]", "timestamp_granularities"):
+        assert _post(gran=["word"], field=field).status_code == 200, field
+
+
+def test_word_only_omits_segments(heard):
+    assert "segments" not in _post(gran=["word"]).json()
+
+
+def test_timings_without_verbose_json_is_a_400(heard):
+    """The timings ride the verbose body and nowhere else. Silently dropping
+    them would bill the alignment pass and return nothing to show for it."""
+    r = _post(gran=["word"], fmt="json")
+    assert r.status_code == 400 and "verbose_json" in r.text
+
+
+def test_unknown_granularity_is_a_400(heard):
+    r = _post(gran=["phoneme"])
+    assert r.status_code == 400 and "phoneme" in r.text
+
+
+def test_verbose_json_names_the_task(heard):
+    assert _post().json()["task"] == "transcribe"
 
 
 def test_unknown_model_is_404(heard):
@@ -170,8 +274,8 @@ class _Info:
 class _Model:
     def __init__(self): self.called_with = {}
 
-    def transcribe(self, audio, language=None, vad_filter=None):
-        self.called_with = dict(language=language, vad_filter=vad_filter)
+    def transcribe(self, audio, language=None, vad_filter=None, word_timestamps=False):
+        self.called_with = dict(language=language, vad_filter=vad_filter, word_timestamps=word_timestamps)
         return iter([_Segment(" the quick "), _Segment(" brown fox ")]), _Info()
 
 
@@ -183,7 +287,7 @@ def test_transcribe_returns_the_models_duration(monkeypatch):
     model = _Model()
     monkeypatch.setattr(stt, "load", lambda m: model)
 
-    text, duration = stt.transcribe("whisper", b"RIFFxxxx", None)
+    text, duration, _ = stt.transcribe("whisper", b"RIFFxxxx", None)
 
     assert duration == 7.25, "the audio duration must reach the caller; 0 means unbillable"
     assert text == "the quick brown fox", "segments are joined and stripped"
@@ -194,7 +298,7 @@ def test_transcribe_bills_submitted_audio_not_speech_only(monkeypatch):
     is charged for what they asked us to listen to, not for how much of it turned
     out to be talking — and VAD is on, so the two always differ."""
     monkeypatch.setattr(stt, "load", lambda m: _Model())
-    _, duration = stt.transcribe("whisper", b"x", None)
+    _, duration, _ = stt.transcribe("whisper", b"x", None)
     assert duration == _Info.duration
     assert duration != _Info.duration_after_vad
 
@@ -244,7 +348,7 @@ class _Ear:
     def __init__(self):
         self.spans = []
 
-    def transcribe(self, audio, language=None, vad_filter=None):
+    def transcribe(self, audio, language=None, vad_filter=None, word_timestamps=False):
         span = len(audio) / stt.RATE
         self.spans.append(span)
         segs, at = [], 0.0
@@ -460,7 +564,7 @@ def test_samples_map_int16_onto_the_unit_range(ear):
 class _Deaf:
     """A model that fails, to check the failure is visible rather than quiet."""
 
-    def transcribe(self, audio, language=None, vad_filter=None):
+    def transcribe(self, audio, language=None, vad_filter=None, word_timestamps=False):
         raise RuntimeError("decoder is unhappy")
 
 

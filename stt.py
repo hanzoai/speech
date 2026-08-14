@@ -65,10 +65,17 @@ def samples(pcm: bytes) -> numpy.ndarray:
     return numpy.frombuffer(pcm, dtype="<i2").astype("float32") / 32768.0
 
 
-def _hear(model: str, audio, language: str | None):
+def _hear(model: str, audio, language: str | None, words: bool = False):
     """The one call into the model. Both entries below differ only in what they
-    hand it — a container to demux, or samples already in hand."""
-    return load(model).transcribe(audio, language=language, vad_filter=True)
+    hand it — a container to demux, or samples already in hand.
+
+    `words` turns on per-word alignment. It is off by default because it is real
+    extra work: the decoder produces segments on its way to the text, but word
+    boundaries are a second pass over the cross-attention. Segment timings are
+    therefore free and word timings are not, which is exactly why the caller
+    says which it wants instead of us always paying for both.
+    """
+    return load(model).transcribe(audio, language=language, vad_filter=True, word_timestamps=words)
 
 
 def segments(model: str, pcm: bytes, language: str | None) -> list:
@@ -83,8 +90,11 @@ def segments(model: str, pcm: bytes, language: str | None) -> list:
     return list(heard)
 
 
-def transcribe(model: str, audio: bytes, language: str | None) -> tuple[str, float]:
-    """Transcribe, returning the text AND the audio's duration in seconds.
+def transcribe(
+    model: str, audio: bytes, language: str | None, words: bool = False
+) -> tuple[str, float, list]:
+    """Transcribe, returning the text, the audio's duration in seconds, and the
+    segments it was heard as.
 
     The duration is the billable quantity: transcription is priced per minute of
     audio by everyone who sells it, and the ai plane meters this call. It was
@@ -93,7 +103,14 @@ def transcribe(model: str, audio: bytes, language: str | None) -> tuple[str, flo
     the audio SUBMITTED, not `duration_after_vad`, which is speech-only: a caller
     is charged for what they asked us to listen to, not for how much of it turned
     out to be talking.
+
+    The segments come back for the same reason the duration does: this function
+    had them and dropped them. A caption cuts on a word boundary, and a caller
+    who cannot see one has to guess where words fall by dividing the line's span
+    by its letters — which drifts a little further with every line. Each segment
+    carries its own words when `words` asked for them.
     """
-    heard, info = _hear(model, io.BytesIO(audio), language)
+    heard, info = _hear(model, io.BytesIO(audio), language, words)
+    heard = list(heard)
     text = " ".join(segment.text.strip() for segment in heard).strip()
-    return text, info.duration
+    return text, info.duration, heard
