@@ -159,11 +159,12 @@ def test_both_granularities_together(heard):
     assert len(body["words"]) == 4 and len(body["segments"]) == 1
 
 
-def test_either_spelling_of_the_array_is_read(heard):
-    """OpenAI's SDKs send timestamp_granularities[]; hand-rolled clients send the
-    bare name. Reading only one is half the callers silently untimed."""
-    for field in ("timestamp_granularities[]", "timestamp_granularities"):
-        assert _post(gran=["word"], field=field).status_code == 200, field
+def test_the_array_field_is_declared_in_the_contract():
+    """A capability nobody can see is a capability that gets lost again. The
+    field is declared, so openapi.json says this service can time a word."""
+    body = client.get("/openapi.json").json()
+    fields = body["components"]["schemas"]["Body_transcriptions_v1_audio_transcriptions_post"]["properties"]
+    assert "timestamp_granularities[]" in fields
 
 
 def test_word_only_omits_segments(heard):

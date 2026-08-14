@@ -30,27 +30,24 @@ def models():
     return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "hanzo"} for n in names]}
 
 
-# What a caller may ask to be timed, and OpenAI's two names for it.
+# What a caller may ask to be timed.
 GRANULARITIES = {"word", "segment"}
 
 
-def granularities(form) -> set[str]:
-    """`timestamp_granularities`, either spelling.
+def granularities(asked: list[str]) -> set[str]:
+    """Validate the granularities a caller asked for.
 
-    OpenAI's own SDKs encode a multipart array with a bracketed name and
-    hand-rolled clients almost always send the bare one. Both mean the same
-    thing, so both are read here — in ONE place — rather than leaving half the
-    clients silently untimed.
+    An unrecognized one is refused by name. Ignoring it would answer 200 with no
+    timings and no reason, which reads as the feature being missing.
     """
-    asked = {*form.getlist("timestamp_granularities[]"), *form.getlist("timestamp_granularities")}
-    unknown = asked - GRANULARITIES
+    unknown = set(asked) - GRANULARITIES
     if unknown:
         raise HTTPException(
             400,
             f"unknown timestamp_granularities {sorted(unknown)}; "
             f"supported: {', '.join(sorted(GRANULARITIES))}",
         )
-    return asked
+    return set(asked)
 
 
 def timed_word(w) -> dict:
@@ -74,15 +71,19 @@ def timed_segment(s) -> dict:
 
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(
-    request: Request,
     file: UploadFile = File(...),
     model: str = Form("whisper"),
     language: str | None = Form(None),
     response_format: str = Form("json"),
+    # The bracketed name is how a multipart array is spelled — it is what the
+    # OpenAI SDKs send and what this service's own caller sends. Declaring it as
+    # a field rather than digging it out of the raw form is what puts it in
+    # openapi.json, where a reader can see the service can time a word at all.
+    timestamp_granularities: list[str] = Form([], alias="timestamp_granularities[]"),
 ):
     if model not in stt.MODELS:
         raise HTTPException(404, f"unknown model {model!r}")
-    asked = granularities(await request.form())
+    asked = granularities(timestamp_granularities)
     # Timings ride the verbose body and nowhere else, so asking for them
     # alongside a body that cannot carry them is a mistake worth naming: the
     # alternative is charging for the alignment pass and then discarding it.
