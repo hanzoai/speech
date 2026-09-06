@@ -62,10 +62,28 @@ jobs:
             "https://ghcr.io/v2/hanzoai/speech/manifests/$V")
           if [ "$C" = "200" ]; then echo "::error::$V already published — bump pyproject"; exit 1; fi
 
+      # ONE IMAGE, BOTH ARCHITECTURES. The lab runs amd64 (evo) and arm64
+      # (spark), so an image built for one deploys on half the fleet. The pool is
+      # amd64, so the arm64 leg runs under emulation (binfmt) and the
+      # multi-platform build needs the docker-container driver, which the
+      # daemon's built-in builder is not. Both setups sit HERE, below the two
+      # gates above, so those keep building natively against the daemon exactly
+      # as before — they test this arch's image, not a QEMU translation of it.
+      #
+      # The published image is a manifest list, which cannot be loaded into a
+      # local daemon, so the build pushes directly and there is no `docker push`
+      # half to forget. `final` is the last stage, so neither test stage rides
+      # into it.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: network=host
+
       - name: Build and push
         run: |
-          docker build -t "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}" .
-          docker push "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}"
+          docker buildx build --platform linux/amd64,linux/arm64 --provenance=false \
+            -t "ghcr.io/hanzoai/speech:${{ steps.v.outputs.version }}" --push .
 
       # THE ONLY STEP THAT DEPLOYS. cd.hanzo.ai does not watch the registry — it
       # watches universe's values files, so an image that is built and pushed and
