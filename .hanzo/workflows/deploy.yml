@@ -1,5 +1,5 @@
 # speech — build the image. Same lane as billing: git.hanzo.ai push → act_runner
-# (hanzo-build-linux-amd64) → docker build → ghcr.io/hanzoai/speech:<semver>.
+# (linux-amd64) → docker build → ghcr.io/hanzoai/speech:<semver>.
 #
 # SEMVER, NEVER SHA. The version is pyproject's, and a published tag is never
 # overwritten — two digests behind one name is the fleet's oldest trap.
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: [hanzo-build-linux-amd64]
+    runs-on: [linux-amd64]
     steps:
       - uses: actions/checkout@v4
 
