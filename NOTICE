@@ -1,0 +1,53 @@
+Hanzo speech
+Copyright 2023-2026 Hanzo AI, Inc.
+
+This service is licensed under the Apache License, Version 2.0 (LICENSE).
+It serves the models and links the software below. Weights are not in this
+repository or in the image; weights.sum names every file, fetched at boot.
+
+Models
+------
+
+parakeet — NVIDIA Parakeet TDT 0.6B v3
+  Copyright NVIDIA Corporation. Licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/).
+  Source: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+  Changes: converted to ONNX and quantized to int8 by the k2-fsa sherpa-onnx
+  project (sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8,
+  https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models); served
+  unmodified from that export.
+
+whisper — OpenAI Whisper large-v3-turbo
+  Copyright (c) 2022 OpenAI. Licensed under the MIT License.
+  Source: https://github.com/openai/whisper
+  Changes: encoder from the k2-fsa sherpa-onnx int8 export
+  (sherpa-onnx-whisper-turbo), with the alignment-head metadata added; decoder
+  re-exported by Hanzo with sherpa-onnx's export-onnx-with-attention.py, which
+  adds the alignment heads' cross-attention as an output, and quantized to int8.
+
+Language identification — OpenAI Whisper tiny
+  Copyright (c) 2022 OpenAI. Licensed under the MIT License.
+  Source: https://github.com/openai/whisper, int8 export
+  sherpa-onnx-whisper-tiny by k2-fsa.
+
+kokoro — Kokoro-82M v1.0, 54 voices
+  Copyright hexgrad. Licensed under the Apache License, Version 2.0.
+  Source: https://huggingface.co/hexgrad/Kokoro-82M; ONNX export
+  kokoro-multi-lang-v1_0 by k2-fsa sherpa-onnx.
+
+Voice activity — Silero VAD
+  Copyright (c) 2020-present Silero Team. Licensed under the MIT License.
+  Source: https://github.com/snakers4/silero-vad
+
+Software
+--------
+
+sherpa-onnx — Copyright k2-fsa. Apache License 2.0.
+  https://github.com/k2-fsa/sherpa-onnx (Go bindings sherpa-onnx-go-linux)
+ONNX Runtime — Copyright Microsoft Corporation. MIT License.
+  https://github.com/microsoft/onnxruntime
+espeak-ng — GPL-3.0-or-later. Built into sherpa-onnx's text-to-speech
+  front end, with its data (espeak-ng-data) shipped beside the Kokoro weights.
+  Source: https://github.com/espeak-ng/espeak-ng
+FFmpeg — LGPL-2.1-or-later / GPL-2.0-or-later as built by Debian.
+  https://ffmpeg.org, invoked as a separate program.
