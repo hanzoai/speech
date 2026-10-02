@@ -189,11 +189,17 @@ empty room, a two-speaker meeting. ffmpeg must be on PATH (on dgx,
 
 ## Measured
 
-On dgx, four big cores (`taskset -c 5-8`, GOMAXPROCS 4), 10 s of speech, warm:
-parakeet RTF 0.024, whisper 0.25, kokoro 0.21, language ID 0.14 s per call;
-whisper costs ~0.55 s per decode plus ~0.18 s per audio second, parakeet
-~0.05 s plus ~0.016. RSS with every model loaded and used: 4.4 GB. Boot with the
-weights on disk: 1.4 s; fetching all 371 files from S3 dominates a cold pod.
+**In the pod** (AMD EPYC 9R14, 4-core limit, GOMAXPROCS 4), wall time per
+request from the service's own log (ffmpeg decode and VAD included), 10 s of
+speech: parakeet RTF 0.055, whisper 0.31–0.33, kokoro 0.25–0.28; on 5 s,
+parakeet 0.09–0.10 and whisper 0.39 (whisper pays ~0.55 s per decode before it
+reads a second of audio). Memory: RSS 3.51 GB at rest with every model loaded,
+3.95 GB peak with parakeet, whisper and kokoro decoding at once; kubelet working
+set 3866Mi, so the chart requests 4.5Gi. A cold pod fetches all 371 files from
+S3 in 17 s and loads every model in 2.2 s: Ready 19 s after start.
+
+On dgx, four big cores (`taskset -c 5-8`): parakeet RTF 0.024, whisper 0.25,
+kokoro 0.21, language ID 0.14 s per call.
 
 ## Release and deploy
 
