@@ -47,6 +47,11 @@ against its own CC BY 4.0 LICENSE file.
 
 ## Routing
 
+`max_seconds` on a transcription holds the caller to a length: the ffmpeg
+decode stops a quarter second past it and audio that runs over is refused 413
+before the model runs. The ai plane's public lane (visitors with no account)
+sends it; a signed-in caller's request carries none.
+
 `whisper` decodes everything, in the language named or the one it detects.
 `parakeet` decodes its 25 languages itself and hands the rest to whisper: a
 `language` outside its set goes straight there; with none named, the speech

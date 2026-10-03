@@ -78,7 +78,7 @@ func speak(t *testing.T, sp *speech, text, voice string) []float32 {
 // the same step a browser takes before it pushes raw audio.
 func at16k(t *testing.T, s []float32) []float32 {
 	t.Helper()
-	pcm, err := decode(context.Background(), wav(s, Spoken))
+	pcm, err := decode(context.Background(), wav(s, Spoken), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestLiveEveryBrowserContainerTranscribes(t *testing.T) {
 			t.Fatalf("%s: %v %s", name, err, b)
 		}
 		data, _ := os.ReadFile(out)
-		pcm, err := decode(context.Background(), data)
+		pcm, err := decode(context.Background(), data, 0)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

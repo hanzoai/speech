@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -153,9 +154,24 @@ func (s *server) transcriptions(w http.ResponseWriter, r *http.Request, sp *spee
 		fail(w, http.StatusBadRequest, "reading the upload: %v", err)
 		return
 	}
-	pcm, err := decode(r.Context(), data)
+	// max_seconds holds a caller to a length — the ai plane's public lane sends
+	// it for a visitor with no account. The decode stops just past it, so the cap
+	// bounds the work and not only the answer.
+	var longest float64
+	if v := r.FormValue("max_seconds"); v != "" {
+		longest, err = strconv.ParseFloat(v, 64)
+		if err != nil || longest <= 0 {
+			fail(w, http.StatusBadRequest, "max_seconds must be a positive number of seconds")
+			return
+		}
+	}
+	pcm, err := decode(r.Context(), data, longest)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if longest > 0 && float64(len(pcm)) > (longest+overrun/2)*Rate {
+		fail(w, http.StatusRequestEntityTooLarge, "the audio runs past %g s; this request takes at most %g s", longest, longest)
 		return
 	}
 	began := time.Now()

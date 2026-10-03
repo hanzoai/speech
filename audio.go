@@ -18,7 +18,11 @@ import (
 // data cannot be demuxed from a stream that cannot seek, and that is the layout
 // most m4a files have. The container is sniffed from the bytes, never from the
 // filename — the ai plane names every upload audio.webm whatever it is.
-func decode(ctx context.Context, data []byte) ([]float32, error) {
+//
+// longest, when positive, stops the decode just past that many seconds, so a
+// caller held to a length pays for no more decoding than the length allows: a
+// file far longer than the cap costs a fraction of a second, not its whole run.
+func decode(ctx context.Context, data []byte, longest float64) ([]float32, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("the file is empty")
 	}
@@ -35,8 +39,11 @@ func decode(ctx context.Context, data []byte) ([]float32, error) {
 		return nil, err
 	}
 	var out, errs bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-i", f.Name(), "-vn", "-ac", "1", "-ar", fmt.Sprint(Rate), "-f", "f32le", "pipe:1")
+	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-i", f.Name(), "-vn", "-ac", "1", "-ar", fmt.Sprint(Rate)}
+	if longest > 0 {
+		args = append(args, "-t", fmt.Sprintf("%.3f", longest+overrun))
+	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", append(args, "-f", "f32le", "pipe:1")...)
 	cmd.Stdout, cmd.Stderr = &out, &errs
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(errs.String())
@@ -52,6 +59,10 @@ func decode(ctx context.Context, data []byte) ([]float32, error) {
 	}
 	return pcm, nil
 }
+
+// overrun is how far past a cap the decode reads, so audio that runs over is told
+// from audio that ends exactly at it.
+const overrun = 0.25
 
 func lastLine(s string) string {
 	if i := strings.LastIndexByte(s, '\n'); i >= 0 {

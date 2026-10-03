@@ -334,6 +334,29 @@ func TestVerboseJSONCarriesTheDurationSubmitted(t *testing.T) {
 	}
 }
 
+// A CAP ON LENGTH BOUNDS THE WORK. The ai plane's public lane holds a visitor to a
+// length with max_seconds; audio past it is refused before any decode of the model,
+// and the ffmpeg decode itself stops just past the cap.
+func TestMaxSecondsRefusesAudioPastIt(t *testing.T) {
+	ffmpegOrSkip(t)
+	r := newRig(t, roomVAD{}, "en")
+	resp, b := r.transcribe(wavOf(recording), map[string][]string{"model": {"whisper"}, "max_seconds": {"5"}})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("7 s under a 5 s cap answered %d %s, want 413", resp.StatusCode, b)
+	}
+	resp, b = r.transcribe(wavOf(recording), map[string][]string{"model": {"whisper"}, "max_seconds": {"7"}, "response_format": {"verbose_json"}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("7 s under a 7 s cap answered %d %s, want 200", resp.StatusCode, b)
+	}
+	if got := decodeJSON(t, b)["duration"].(float64); math.Abs(got-7) > 0.01 {
+		t.Fatalf("duration %v, want 7", got)
+	}
+	resp, _ = r.transcribe(wavOf(recording), map[string][]string{"model": {"whisper"}, "max_seconds": {"-1"}})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a negative cap answered %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestPlainJSONIsJustTheText(t *testing.T) {
 	ffmpegOrSkip(t)
 	r := newRig(t, roomVAD{}, "en")
