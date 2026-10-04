@@ -399,3 +399,91 @@ func TestLiveRealtimeFactor(t *testing.T) {
 		}
 	}
 }
+
+// long is the e2e passage: a minute and more, a city to a sentence.
+var long = []string{
+	"In Paris, the first train of the morning leaves before the sun comes up over the river.",
+	"By noon the same carriages are rolling slowly through the green hills outside Vienna.",
+	"A friend of mine once spent a whole summer teaching music to children in Nairobi.",
+	"She wrote to me every week about the markets, the rain, and the long bus rides.",
+	"Later she moved to Lima, where the fog sits on the coast for half of the year.",
+	"Her brother works on fishing boats in the cold dark water just north of Oslo.",
+	"He says the winter nights are long, but the northern lights make up for all of it.",
+	"Their parents still live in Cairo, in a flat with a balcony above a busy street.",
+	"Every spring the whole family meets for a week in a small hotel in Lisbon.",
+	"Last year a cousin flew in from Sydney and brought a box of strange sweets.",
+	"Another cousin drove all the way from Toronto with two dogs in the back seat.",
+	"They argued about football in Madrid and about coffee in a tiny cafe in Berlin.",
+	"Next year they plan to rent a house by the sea somewhere south of Dublin.",
+	"If that falls through, the backup plan is a long trip by train across Seoul.",
+	"Whatever happens, the last postcard will be mailed from Chicago in the autumn.",
+}
+
+// stammers counts the words got says twice in a row that want does not: a word
+// heard by the decodes on both sides of a cut.
+func stammers(want, got string) []string {
+	norm := func(s string) []string {
+		return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\'' })
+	}
+	said := map[string]bool{}
+	w := norm(want)
+	for i := 1; i < len(w); i++ {
+		if w[i] == w[i-1] {
+			said[w[i]] = true
+		}
+	}
+	var out []string
+	g := norm(got)
+	for i := 1; i < len(g); i++ {
+		if g[i] == g[i-1] && !said[g[i]] {
+			out = append(out, g[i-1]+" "+g[i])
+		}
+	}
+	return out
+}
+
+// TestLiveALongPassageHasNoSeams is a minute of read speech — the passage the
+// hanzo.ai e2e dictates — pushed as a browser pushes it, a quarter second at a
+// time in real time, and pushed all at once, which leaves the decoder a minute
+// behind. Either way the window is committed many times inside unbroken speech,
+// and no cut may land in a word: before, it came back "the markets, the The rain",
+// "make up But for", "a long trip by train." with "across Seoul" gone.
+func TestLiveALongPassageHasNoSeams(t *testing.T) {
+	sp := live(t)
+	var pcm []float32
+	for _, line := range long {
+		pcm = append(pcm, at16k(t, speak(t, sp, line, "af_heart"))...)
+	}
+	want := strings.Join(long, " ")
+	t.Logf("passage %.1f s", float64(len(pcm))/Rate)
+	for _, paced := range []bool{true, false} {
+		tr := newTranscript(sp, "parakeet", "en")
+		step := Chunk / Width
+		t0 := time.Now()
+		for i, at := 0, 0; at < len(pcm); i, at = i+1, at+step {
+			if d := time.Until(t0.Add(time.Duration(i) * 256 * time.Millisecond)); paced && d > 0 {
+				time.Sleep(d)
+			}
+			tr.push(pcm[at:min(at+step, len(pcm))])
+		}
+		if err := tr.close(); err != nil {
+			t.Fatal(err)
+		}
+		e := wer(want, tr.text)
+		t.Logf("paced %v: wer %.3f: %s", paced, e, tr.text)
+		if s := stammers(want, tr.text); len(s) > 0 {
+			t.Errorf("paced %v: a word heard on both sides of a cut: %q", paced, s)
+		}
+		at := -1
+		for _, city := range []string{"Paris", "Vienna", "Nairobi", "Lima", "Oslo", "Cairo", "Lisbon", "Sydney", "Toronto", "Madrid", "Berlin", "Dublin", "Seoul", "Chicago"} {
+			i := strings.Index(tr.text, city)
+			if i <= at {
+				t.Errorf("paced %v: %s is missing or out of order", paced, city)
+			}
+			at = max(at, i)
+		}
+		if e > 0.015 {
+			t.Errorf("paced %v: word error %.3f", paced, e)
+		}
+	}
+}

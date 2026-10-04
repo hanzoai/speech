@@ -144,9 +144,12 @@ round-trips poorly. European voices round-trip exactly.
   empty room of -45 dBFS room tone bills 0 (live test).
 - **The window**: a pass finds the spans in it; spans that end a `Guard` (1 s)
   before its end are decoded on their own and committed, their audio freed; the
-  rest is decoded as one piece and becomes `pending`. Past 12 s the guard drops,
-  so the window cannot grow. One pass per session at a time; passes queue in
-  the recognizer's FIFO behind other sessions'.
+  rest is decoded as one piece and becomes `pending`. Past 12 s the window is
+  committed inside unbroken speech, so it cannot grow, and the cut goes in the
+  quietest 80 ms of the 3 s before the guard (`quietest`), never at the newest
+  sample: cut mid-word, both decodes answer with the word ("music to to
+  children"). Whisper's 28 s split takes its lull the same way. One pass per
+  session at a time; passes queue in the recognizer's FIFO behind other sessions'.
 - A parakeet session that names no language waits for 2 s of speech, identifies
   it once, and keeps the answer.
 

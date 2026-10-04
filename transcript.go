@@ -229,10 +229,18 @@ func (t *transcript) absorb(window []float32, final bool) error {
 	}
 	n := len(window)
 	edge := n - int(Guard*Rate)
-	if final || n > int(Window*Rate) {
-		edge = n // past Window, holding the tail back forever would let the window grow without bound
-	}
 	regions := t.sp.vad.regions(window)
+	switch {
+	case final:
+		edge = n
+	case n > int(Window*Rate):
+		// Past Window the tail is committed, or the window would grow without
+		// bound — but at the quietest moment of the Search seconds before the
+		// guard, not at the last sample. Committed at the last sample, a word
+		// still being said is cut in two and both decodes answer with it.
+		edge = quietest(window, edge-int(Search*Rate), edge)
+		regions = split(regions, edge)
+	}
 	var settled, open []span
 	for _, r := range regions {
 		if r.end <= edge {
@@ -242,7 +250,7 @@ func (t *transcript) absorb(window []float32, final bool) error {
 		}
 	}
 
-	parts := stretches(settled, merges[t.name])
+	parts := stretches(settled, merges[t.name], func(lo, hi int) int { return quietest(window, lo, hi) })
 	next := -1
 	if len(open) > 0 {
 		next = open[0].start

@@ -535,20 +535,20 @@ func TestEveryParakeetLanguageIsOneWhisperKnows(t *testing.T) {
 func TestStretchesMergeForWhisperAndSplitLongSpeech(t *testing.T) {
 	s := func(a, b float64) span { return span{int(a * Rate), int(b * Rate)} }
 	regions := []span{s(0, 2), s(3, 5), s(8, 9)}
-	if got, want := stretches(regions, true), []span{s(0, 5), s(8, 9)}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if got, want := stretches(regions, true, atLimit), []span{s(0, 5), s(8, 9)}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("whisper merges close speech: %v want %v", got, want)
 	}
-	if got := stretches(regions, false); fmt.Sprint(got) != fmt.Sprint(regions) {
+	if got := stretches(regions, false, atLimit); fmt.Sprint(got) != fmt.Sprint(regions) {
 		t.Fatalf("parakeet decodes each stretch on its own: %v", got)
 	}
 	if !merges["whisper"] || merges["parakeet"] {
 		t.Fatal("whisper merges; parakeet does not")
 	}
-	if got := stretches([]span{s(0, 18), s(19, 30)}, true); len(got) != 2 {
+	if got := stretches([]span{s(0, 18), s(19, 30)}, true, atLimit); len(got) != 2 {
 		t.Fatalf("no merge past Longest: %v", got)
 	}
 	for _, merge := range []bool{true, false} {
-		got := stretches([]span{s(0, 70)}, merge)
+		got := stretches([]span{s(0, 70)}, merge, atLimit)
 		for _, g := range got {
 			if float64(g.end-g.start) > Hardest*Rate {
 				t.Fatalf("a stretch longer than whisper can attend over: %v", got)
@@ -853,18 +853,35 @@ func TestCloseCommitsTheRemainder(t *testing.T) {
 	}
 }
 
-func TestTheWindowStaysBoundedUnderContinuousSpeech(t *testing.T) {
+// speaking is a minute of speech with no pause long enough to end a stretch:
+// thirty words, each followed by the brief lull between words that speech has
+// and a pause detector does not count.
+func speaking() []float32 {
+	var pcm []float32
+	for v := 1; v <= 30; v++ {
+		pcm = append(pcm, cat(tone(v, 1.9), quiet(0.1))...)
+	}
+	return pcm
+}
+
+// TestContinuousSpeechIsCutBetweenWords. Past Window the tail is committed so the
+// window stays bounded, and pushes do not arrive on word boundaries: a cut at the
+// newest sample lands inside a word, and both decodes name it ("6 6", "11 11").
+// The cut goes in the lull before it instead, so every word is heard once.
+func TestContinuousSpeechIsCutBetweenWords(t *testing.T) {
 	r := newRig(t, alwaysVAD{}, "en")
 	tr := newTranscript(r.sp, "whisper", "en")
-	for v := 1; v <= 30; v++ { // 60 s with no pause at all
-		tr.push(tone(v, 2))
+	pcm := speaking()
+	step := Chunk / Width
+	for at := 0; at < len(pcm); at += step {
+		tr.push(pcm[at:min(at+step, len(pcm))])
 		settle(t, tr)
-	}
-	if len(tr.window) > int((Window+2)*Rate) {
-		t.Fatalf("window grew to %.1f s", float64(len(tr.window))/Rate)
+		if len(tr.window) > int((Window+1)*Rate) {
+			t.Fatalf("window grew to %.1f s", float64(len(tr.window))/Rate)
+		}
 	}
 	for _, s := range r.whisper.spans {
-		if s > Window+2+2*Pad {
+		if s > Window+1+2*Pad {
 			t.Fatalf("a decode covered %.1f s", s)
 		}
 	}
@@ -876,7 +893,52 @@ func TestTheWindowStaysBoundedUnderContinuousSpeech(t *testing.T) {
 		want = append(want, strconv.Itoa(v))
 	}
 	if tr.text != strings.Join(want, " ") {
-		t.Fatalf("every tone exactly once, in order: %q", tr.text)
+		t.Fatalf("every word exactly once, in order: %q", tr.text)
+	}
+}
+
+// TestQuietestFindsTheLull: the cut lands in the gap between two words, and of two
+// equal lulls in the later one, which commits more.
+func TestQuietestFindsTheLull(t *testing.T) {
+	pcm := cat(tone(5, 1), quiet(0.1), tone(6, 1), quiet(0.1), tone(7, 1))
+	at := quietest(pcm, 0, len(pcm))
+	if lo, hi := int(2.1*Rate), int(2.2*Rate); at < lo || at >= hi {
+		t.Fatalf("cut at %.3f s, want inside the second lull [2.1, 2.2)", float64(at)/Rate)
+	}
+	at = quietest(pcm, 0, int(2*Rate))
+	if lo, hi := int(1.0*Rate), int(1.1*Rate); at < lo || at >= hi {
+		t.Fatalf("cut at %.3f s, want inside the first lull [1.0, 1.1)", float64(at)/Rate)
+	}
+	if got := quietest(pcm, 10, 20); got != 20 {
+		t.Fatalf("a range shorter than a lull cuts at its end: %d", got)
+	}
+}
+
+func TestSplitCutsTheRegionAcrossTheLine(t *testing.T) {
+	got := split([]span{{0, 10}, {20, 40}, {50, 60}}, 30)
+	if fmt.Sprint(got) != fmt.Sprint([]span{{0, 10}, {20, 30}, {30, 40}, {50, 60}}) {
+		t.Fatal(got)
+	}
+	if got := split([]span{{0, 10}}, 10); fmt.Sprint(got) != "[{0 10}]" {
+		t.Fatalf("a line at a region's edge cuts nothing: %v", got)
+	}
+}
+
+// TestALongStretchIsSplitInALull: whisper decodes nothing past Hardest, and the
+// split that keeps it there lands between words, not at the 28th second.
+func TestALongStretchIsSplitInALull(t *testing.T) {
+	var pcm []float32
+	for v := 1; v <= 40; v++ {
+		pcm = append(pcm, cat(tone(v, 1.67), quiet(0.08))...)
+	}
+	parts := stretches([]span{{0, len(pcm)}}, true, func(lo, hi int) int { return quietest(pcm, lo, hi) })
+	if len(parts) < 3 {
+		t.Fatalf("70 s must split: %v", parts)
+	}
+	for _, p := range parts[:len(parts)-1] {
+		if pcm[p.end] != 0 {
+			t.Fatalf("split at %.3f s inside a word", float64(p.end)/Rate)
+		}
 	}
 }
 
@@ -1328,3 +1390,6 @@ func captureLogs(w io.Writer) func() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
 	return func() { slog.SetDefault(prev) }
 }
+
+// atLimit is a quiet that finds no lull: a split falls where the length runs out.
+func atLimit(_, hi int) int { return hi }

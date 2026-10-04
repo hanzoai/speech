@@ -24,6 +24,8 @@ const (
 	Gap     = 2.0  // whisper decodes stretches closer than this together
 	Longest = 20.0 // and merges none past this length
 	Hardest = 28.0 // and decodes none longer than this: its ceiling is 30
+	Search  = 3.0  // a cut that must fall inside speech looks this far back for a lull
+	Lull    = 0.08 // the stretch of audio a cut point is weighed by
 )
 
 // How a parakeet request that names no language finds out which one it is.
@@ -160,8 +162,10 @@ var merges = map[string]bool{"whisper": true}
 
 // stretches cuts audio into the spans that are decoded: speech regions, merged
 // while they are close together and short enough when the recognizer merges,
-// and split by length if one is still too long for whisper.
-func stretches(regions []span, merge bool) []span {
+// and split by length if one is still too long for whisper. A split lands where
+// quiet says, which is the quietest moment before the length runs out: cut
+// mid-word, the decode on either side answers with the whole word.
+func stretches(regions []span, merge bool, quiet func(lo, hi int) int) []span {
 	var out []span
 	for _, r := range regions {
 		if n := len(out); merge && n > 0 {
@@ -177,12 +181,55 @@ func stretches(regions []span, merge bool) []span {
 	hard := int(Hardest * Rate)
 	for _, s := range out {
 		for s.end-s.start > hard {
-			cut = append(cut, span{s.start, s.start + hard})
-			s.start += hard
+			at := quiet(s.start+hard-int(Search*Rate), s.start+hard)
+			cut = append(cut, span{s.start, at})
+			s.start = at
 		}
 		cut = append(cut, s)
 	}
 	return cut
+}
+
+// quietest is where to cut pcm somewhere in [lo, hi): the middle of the quietest
+// Lull of it, weighed in 10 ms steps. A recognizer handed half a word answers
+// with a word, so the half before a cut and the half after both come back whole
+// — "music to to children", "a tiny cab. Cafe". Between words, or at a comma,
+// there is nothing to hear twice.
+func quietest(pcm []float32, lo, hi int) int {
+	lo, hi = max(lo, 0), min(hi, len(pcm))
+	lull, step := int(Lull*Rate), Rate/100
+	if hi-lo <= lull {
+		return hi
+	}
+	energy := func(a int) float64 {
+		var e float64
+		for _, x := range pcm[a : a+lull] {
+			e += float64(x) * float64(x)
+		}
+		return e
+	}
+	best, at := energy(lo), lo
+	for a := lo + step; a+lull <= hi; a += step {
+		if e := energy(a); e <= best { // the latest of equals: the more is committed, the smaller the window
+			best, at = e, a
+		}
+	}
+	return at + lull/2
+}
+
+// split cuts any region that runs across at into the part before it and the part
+// after, so a cut that has to fall inside speech still has spans to decode on
+// either side of it.
+func split(regions []span, at int) []span {
+	out := make([]span, 0, len(regions)+1)
+	for _, r := range regions {
+		if r.start < at && at < r.end {
+			out = append(out, span{r.start, at}, span{at, r.end})
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // reach is the audio a stretch is decoded from: Pad either side of its speech,
@@ -262,7 +309,7 @@ func (sp *speech) transcribe(model, lang string, pcm []float32) (transcription, 
 	if err != nil {
 		return out, err
 	}
-	parts := stretches(regions, merges[engine])
+	parts := stretches(regions, merges[engine], func(lo, hi int) int { return quietest(pcm, lo, hi) })
 	for i, s := range parts {
 		prev, next := -1, -1
 		if i > 0 {
