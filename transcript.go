@@ -107,6 +107,7 @@ type transcript struct {
 	ear  ear
 	name string
 	lang string
+	said string // the language spoken, named or identified; "" until known
 }
 
 func newTranscript(sp *speech, model, lang string) *transcript {
@@ -117,7 +118,7 @@ func newTranscript(sp *speech, model, lang string) *transcript {
 		sq: &squelch{g: sp.vad.gate()}, touched: time.Now(),
 	}
 	if model == "whisper" || lang != "" {
-		t.ear, t.name, t.lang, _ = sp.route(model, lang, nil)
+		t.ear, t.name, t.lang, t.said, _ = sp.route(model, lang, nil)
 	}
 	return t
 }
@@ -209,12 +210,12 @@ func (t *transcript) resolve(window []float32) error {
 	if t.ear != nil {
 		return nil
 	}
-	e, name, lang, err := t.sp.route(t.model, "", func() []float32 { return spoken(window, t.sp.vad.regions(window)) })
+	e, name, lang, said, err := t.sp.route(t.model, "", func() []float32 { return spoken(window, t.sp.vad.regions(window)) })
 	if err != nil {
 		return err
 	}
 	t.mu.Lock()
-	t.ear, t.name, t.lang = e, name, lang
+	t.ear, t.name, t.lang, t.said = e, name, lang, said
 	t.mu.Unlock()
 	return nil
 }
@@ -355,12 +356,15 @@ type state struct {
 	Pending  string  `json:"pending"`
 	Seconds  float64 `json:"seconds"`
 	Duration float64 `json:"duration"`
+	// Language is what is being spoken, ISO-639-1, once a caller named it or the
+	// session identified it; a conversation answers in it. Absent until then.
+	Language string `json:"language,omitempty"`
 }
 
 func (t *transcript) state(billed float64) state {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return state{ID: t.id, Text: t.text, Pending: t.pending, Seconds: round(t.seconds), Duration: round(billed)}
+	return state{ID: t.id, Text: t.text, Pending: t.pending, Seconds: round(t.seconds), Duration: round(billed), Language: t.said}
 }
 
 // sessions holds this process's open transcripts. A growing transcript is a

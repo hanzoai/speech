@@ -128,6 +128,14 @@ func load(dir string) (*speech, error) {
 		set(func() { sp.mouths["kokoro"] = k })
 		return nil
 	})
+	step("supertonic", func() error {
+		s, err := newSupertonic(dir)
+		if err != nil {
+			return err
+		}
+		set(func() { sp.mouths["supertonic"] = s })
+		return nil
+	})
 	step("vad", func() error {
 		v, err := newSilero(dir)
 		if err != nil {

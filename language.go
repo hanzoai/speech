@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"unicode"
 )
 
 // parakeetLanguages are the 25 European languages Parakeet TDT 0.6B v3 was
@@ -50,4 +52,70 @@ func language(raw string) (string, error) {
 		return "", fmt.Errorf("unknown language %q; send an ISO-639-1 code such as en, de, zh or ja", raw)
 	}
 	return code, nil
+}
+
+// kokoroLanguages are the languages a Kokoro v1.0 voice speaks, one per voice
+// prefix (kokoroLang): American and British English, Spanish, French, Hindi,
+// Italian, Japanese, Brazilian Portuguese and Mandarin.
+var kokoroLanguages = set("en", "es", "fr", "hi", "it", "ja", "pt", "zh")
+
+// supertonicLanguages are Supertonic 3's 31, from its model card. Arabic is the
+// one this service carries it for; the rest come with it.
+var supertonicLanguages = set("en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi",
+	"hr", "hu", "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi")
+
+// script names the language a text's own letters settle: "ar" when most of its
+// letters are Arabic script, "" otherwise. Only Arabic is read off the page —
+// it is the one script a caller can send kokoro that none of its voices can say.
+// Arabic script also writes Persian and Urdu, which supertonic does not speak;
+// a caller with those names its language and is told so.
+func script(text string) string {
+	var letters, arabic int
+	for _, r := range text {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		letters++
+		if unicode.Is(unicode.Arabic, r) {
+			arabic++
+		}
+	}
+	if letters > 0 && 2*arabic > letters {
+		return "ar"
+	}
+	return ""
+}
+
+func sorted(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Breath is the quiet put between two sentences a stream synthesised apart.
+const Breath = 0.15
+
+// sentencesOf cuts text after each sentence's closing mark — Latin or Arabic —
+// and at line breaks, keeping the mark with its sentence. A stream synthesises
+// these one at a time, so the first can play while the next is made.
+func sentencesOf(text string) []string {
+	var out []string
+	start := 0
+	rs := []rune(text)
+	for i, r := range rs {
+		end := r == '\n' || ((r == '.' || r == '!' || r == '?' || r == '؟' || r == '؛' || r == '…') && (i+1 == len(rs) || unicode.IsSpace(rs[i+1])))
+		if end {
+			if s := strings.TrimSpace(string(rs[start : i+1])); s != "" {
+				out = append(out, s)
+			}
+			start = i + 1
+		}
+	}
+	if s := strings.TrimSpace(string(rs[start:])); s != "" {
+		out = append(out, s)
+	}
+	return out
 }

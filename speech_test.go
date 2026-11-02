@@ -181,12 +181,14 @@ func (l fixedLID) identify([]float32) (string, error) { return l.lang, nil }
 type toneMouth struct {
 	voice string
 	speed float32
+	lang  string
+	said  string
 }
 
-func (m *toneMouth) speak(text, voice string, speed float32) ([]float32, error) {
-	m.voice, m.speed = voice, speed
-	n := int(float64(len(text)) * 0.1 * Spoken / float64(speed))
-	out := make([]float32, n)
+// speak says 0.1 s of tone per character.
+func (m *toneMouth) speak(text, voice, lang string, speed float32) ([]float32, error) {
+	m.voice, m.speed, m.lang, m.said = voice, speed, lang, text
+	out := make([]float32, int(float64(len(text))*0.1*Spoken/float64(speed)))
 	for i := range out {
 		out[i] = float32(0.3 * math.Sin(2*math.Pi*440*float64(i)/Spoken))
 	}
@@ -199,17 +201,18 @@ type rig struct {
 	srv      *httptest.Server
 	parakeet *namingEar
 	whisper  *namingEar
-	mouth    *toneMouth
+	mouth    *toneMouth // kokoro
+	tonic    *toneMouth // supertonic
 	sp       *speech
 }
 
 func newRig(t *testing.T, v vad, lid string) *rig {
 	t.Helper()
-	r := &rig{t: t, parakeet: &namingEar{}, whisper: &namingEar{}, mouth: &toneMouth{}}
+	r := &rig{t: t, parakeet: &namingEar{}, whisper: &namingEar{}, mouth: &toneMouth{}, tonic: &toneMouth{}}
 	r.sp = &speech{
 		ears:   map[string]ear{"parakeet": r.parakeet, "whisper": r.whisper},
 		lid:    fixedLID{lid},
-		mouths: map[string]mouth{"kokoro": r.mouth},
+		mouths: map[string]mouth{"kokoro": r.mouth, "supertonic": r.tonic},
 		vad:    v,
 	}
 	r.s = &server{maxIn: 100 << 20}
@@ -1297,7 +1300,7 @@ func TestHealthIsReadyOnlyOnceModelsLoad(t *testing.T) {
 	if resp.StatusCode != 503 {
 		t.Fatalf("a model route while loading: %d", resp.StatusCode)
 	}
-	s.sp.Store(&speech{ears: map[string]ear{"parakeet": &namingEar{}, "whisper": &namingEar{}}, mouths: map[string]mouth{"kokoro": &toneMouth{}}})
+	s.sp.Store(&speech{ears: map[string]ear{"parakeet": &namingEar{}, "whisper": &namingEar{}}, mouths: map[string]mouth{"kokoro": &toneMouth{}, "supertonic": &toneMouth{}}})
 	resp, _ = http.Get(srv.URL + "/healthz")
 	if resp.StatusCode != 200 {
 		t.Fatalf("ready: %d", resp.StatusCode)

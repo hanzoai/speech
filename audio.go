@@ -156,3 +156,67 @@ func encode(ctx context.Context, s []float32, rate int, name string) ([]byte, st
 	}
 	return out.Bytes(), f.mime, nil
 }
+
+// resample converts mono samples from one rate to another with a windowed-sinc
+// filter: a Blackman window over taps input samples either side of each output
+// instant, the cutoff at 0.95 of the lower Nyquist so a downsample does not
+// fold what it cannot carry back into what it keeps. The ratio is reduced to
+// lowest terms and the filter for each of its phases is built once, so a
+// 44.1 kHz to 24 kHz pass (147:80) evaluates 80 filters, never a sine per tap.
+func resample(x []float32, from, to int) []float32 {
+	if from == to || len(x) == 0 {
+		return x
+	}
+	g := gcd(from, to)
+	up, down := to/g, from/g // output n sits at input n*down/up
+	cut := 0.95 * 0.5 * math.Min(1, float64(to)/float64(from))
+	const taps = 16
+	reach := int(math.Ceil(taps / (2 * cut) / 2)) // input samples either side, wider when cutting lower
+	width := 2*reach + 1
+	bank := make([][]float32, up)
+	for p := range bank {
+		frac := float64(p) / float64(up)
+		h := make([]float32, width)
+		var sum float64
+		for j := range h {
+			d := float64(j-reach) - frac // distance from the output instant, in input samples
+			w := 0.42 + 0.5*math.Cos(math.Pi*d/float64(reach+1)) + 0.08*math.Cos(2*math.Pi*d/float64(reach+1))
+			if math.Abs(d) > float64(reach+1) {
+				w = 0
+			}
+			s := 2 * cut
+			if d != 0 {
+				s = math.Sin(2*math.Pi*cut*d) / (math.Pi * d)
+			}
+			h[j] = float32(s * w)
+			sum += s * w
+		}
+		for j := range h { // unity gain at DC, whatever the phase
+			h[j] = float32(float64(h[j]) / sum)
+		}
+		bank[p] = h
+	}
+	n := len(x) * up / down
+	out := make([]float32, n)
+	for i := range out {
+		pos := i * down
+		at, p := pos/up, pos%up
+		h := bank[p]
+		var acc float32
+		for j, c := range h {
+			k := at + j - reach
+			if k >= 0 && k < len(x) {
+				acc += x[k] * c
+			}
+		}
+		out[i] = acc
+	}
+	return out
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
