@@ -67,7 +67,7 @@ func live(t *testing.T) *speech {
 // speak has kokoro say text, at its own 24 kHz.
 func speak(t *testing.T, sp *speech, text, voice string) []float32 {
 	t.Helper()
-	s, err := sp.mouths["kokoro"].speak(text, voice, 1)
+	s, err := sp.mouths["kokoro"].speak(text, voice, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestLiveParakeetHandsWhatItLacksToWhisper(t *testing.T) {
 		{"hf_alpha", "नमस्ते, आज मौसम बहुत अच्छा है और हम पार्क जा रहे हैं।", "hi", unicode.Devanagari},
 	} {
 		pcm := at16k(t, speak(t, sp, c.text, c.voice))
-		_, engine, _, err := sp.route("parakeet", "", func() []float32 { return spoken(pcm, sp.vad.regions(pcm)) })
+		_, engine, _, _, err := sp.route("parakeet", "", func() []float32 { return spoken(pcm, sp.vad.regions(pcm)) })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +257,7 @@ func TestLiveParakeetHandsWhatItLacksToWhisper(t *testing.T) {
 	}
 	// And a European language stays with parakeet.
 	pcm := at16k(t, speak(t, sp, "Buenos días, hoy vamos a la playa con mis amigos.", "ef_dora"))
-	_, engine, _, _ := sp.route("parakeet", "", func() []float32 { return spoken(pcm, sp.vad.regions(pcm)) })
+	_, engine, _, _, _ := sp.route("parakeet", "", func() []float32 { return spoken(pcm, sp.vad.regions(pcm)) })
 	if engine != "parakeet" {
 		t.Fatalf("Spanish routed to %s", engine)
 	}
@@ -386,7 +386,7 @@ func TestLiveRealtimeFactor(t *testing.T) {
 		t.Logf("%-8s RTF %.3f (%.2f s audio, %d threads)", m, time.Since(began).Seconds()/audio, audio, runtime.GOMAXPROCS(0))
 	}
 	began := time.Now()
-	out, _ := sp.mouths["kokoro"].speak(said+" "+said, "af_heart", 1)
+	out, _ := sp.mouths["kokoro"].speak(said+" "+said, "af_heart", "", 1)
 	t.Logf("%-8s RTF %.3f (%.2f s audio)", "kokoro", time.Since(began).Seconds()/(float64(len(out))/Spoken), float64(len(out))/Spoken)
 	began = time.Now()
 	sp.lid.identify(pcm)

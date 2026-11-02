@@ -60,9 +60,11 @@ type lid interface {
 	identify(pcm []float32) (string, error)
 }
 
-// A mouth turns text into 24 kHz mono samples in one of its voices.
+// A mouth turns text into 24 kHz mono samples in one of its voices. lang is the
+// language the text is in, for a model that reads it per call; kokoro takes its
+// language from the voice and ignores it.
 type mouth interface {
-	speak(text, voice string, speed float32) ([]float32, error)
+	speak(text, voice, lang string, speed float32) ([]float32, error)
 }
 
 // A gate is one session's squelch detector: it remembers the room across pushes.
@@ -86,14 +88,14 @@ type vad interface {
 type speech struct {
 	ears   map[string]ear   // "parakeet", "whisper"
 	lid    lid              // routes parakeet's foreign speech to whisper
-	mouths map[string]mouth // "kokoro"
+	mouths map[string]mouth // "kokoro", "supertonic"
 	vad    vad
 }
 
 // heard and spoken list the model ids, in the order /v1/models names them.
 var (
 	heardBy  = []string{"parakeet", "whisper"}
-	spokenBy = []string{"kokoro"}
+	spokenBy = []string{"kokoro", "supertonic"}
 )
 
 func (sp *speech) models() []string {
@@ -123,32 +125,76 @@ func (sp *speech) models() []string {
 // The language handed to whisper on a fallback is "" when it was identified
 // rather than named: whisper's own detection runs on a model forty times the
 // size of the identifier's, and it is one decoder step.
-func (sp *speech) route(model, lang string, heard func() []float32) (ear, string, string, error) {
+//
+// said is the language the speech is in as far as routing knows it — named, or
+// identified — and "" when nothing said which. A growing transcript reports it,
+// so a conversation can answer in the language it was spoken to in.
+func (sp *speech) route(model, lang string, heard func() []float32) (e ear, name, code, said string, err error) {
 	switch model {
 	case "whisper":
-		return sp.ears["whisper"], "whisper", lang, nil
+		return sp.ears["whisper"], "whisper", lang, lang, nil
 	case "parakeet":
 		if lang != "" {
 			if parakeetLanguages[lang] {
-				return sp.ears["parakeet"], "parakeet", lang, nil
+				return sp.ears["parakeet"], "parakeet", lang, lang, nil
 			}
-			return sp.ears["whisper"], "whisper", lang, nil
+			return sp.ears["whisper"], "whisper", lang, lang, nil
 		}
 		pcm := heard()
 		if len(pcm) == 0 {
-			return sp.ears["parakeet"], "parakeet", "", nil
+			return sp.ears["parakeet"], "parakeet", "", "", nil
 		}
 		said, err := sp.lid.identify(pcm)
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", "", "", err
 		}
 		if parakeetLanguages[said] {
-			return sp.ears["parakeet"], "parakeet", "", nil
+			return sp.ears["parakeet"], "parakeet", "", said, nil
 		}
 		slog.Info("parakeet hands a language it lacks to whisper", "identified", said)
-		return sp.ears["whisper"], "whisper", "", nil
+		return sp.ears["whisper"], "whisper", "", said, nil
 	}
-	return nil, "", "", fmt.Errorf("model %q transcribes nothing", model)
+	return nil, "", "", "", fmt.Errorf("model %q transcribes nothing", model)
+}
+
+// speaker decides which model speaks a request, and in which language.
+//
+// supertonic is asked for by name. kokoro — zen-voice-mini's upstream — keeps
+// every language one of its voices speaks (the voice decides which) and hands a
+// language it has no voice for to supertonic: one named in `language`, or, when
+// none is named, text written in Arabic script, which no Kokoro voice can read.
+// So one model id speaks Arabic, German, Korean and the rest, and a caller that
+// already names its language never needs to know there are two engines.
+//
+// lang comes back "" for kokoro, which reads its language off the voice, and as
+// the code supertonic reads the text in otherwise.
+func speaker(model, lang, text string) (string, string, error) {
+	if lang == "" && model == "kokoro" && script(text) == "ar" {
+		lang = "ar"
+	}
+	switch model {
+	case "kokoro":
+		if lang == "" || kokoroLanguages[lang] {
+			return "kokoro", "", nil
+		}
+		if supertonicLanguages[lang] {
+			return "supertonic", lang, nil
+		}
+	case "supertonic":
+		if lang == "" {
+			lang = script(text)
+		}
+		if lang == "" {
+			lang = "en"
+		}
+		if supertonicLanguages[lang] {
+			return "supertonic", lang, nil
+		}
+	default:
+		return "", "", fmt.Errorf("unknown model %q; speech models: %s", model, strings.Join(spokenBy, ", "))
+	}
+	return "", "", fmt.Errorf("no voice speaks %q; kokoro speaks %s and supertonic %s",
+		lang, strings.Join(sorted(kokoroLanguages), ", "), strings.Join(sorted(supertonicLanguages), ", "))
 }
 
 // merges says which recognizers decode neighbouring stretches of speech as one
@@ -305,7 +351,7 @@ func (sp *speech) transcribe(model, lang string, pcm []float32) (transcription, 
 	if len(regions) == 0 {
 		return out, nil
 	}
-	e, engine, code, err := sp.route(model, lang, func() []float32 { return spoken(pcm, regions) })
+	e, engine, code, _, err := sp.route(model, lang, func() []float32 { return spoken(pcm, regions) })
 	if err != nil {
 		return out, err
 	}

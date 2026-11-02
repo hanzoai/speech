@@ -295,7 +295,7 @@ func newKokoro(dir string) (*kokoro, error) {
 	return &kokoro{tts: t, run: newWorker()}, nil
 }
 
-func (k *kokoro) speak(text, voice string, speed float32) ([]float32, error) {
+func (k *kokoro) speak(text, voice, _ string, speed float32) ([]float32, error) {
 	sid, ok := kokoroID[voice]
 	if !ok {
 		return nil, fmt.Errorf("kokoro has no voice %q", voice)
@@ -309,6 +309,65 @@ func (k *kokoro) speak(text, voice string, speed float32) ([]float32, error) {
 		return nil, fmt.Errorf("kokoro produced no audio for this input")
 	}
 	return out.Samples, nil
+}
+
+// supertonic is Supertonic 3 (Supertone, OpenRAIL-M) in the k2-fsa sherpa-onnx
+// int8 export: ten voices, 31 languages, the language passed per call. It speaks
+// at 44.1 kHz and is resampled to Spoken, the rate every caller of this service
+// reads. Not autoregressive: a flow-matching pass over the whole sentence, so
+// its cost is steps x length, measured at a real-time factor of 0.085 on two
+// Zen 5 cores at five steps.
+type supertonic struct {
+	tts  *sherpa.OfflineTts
+	rate int
+	run  worker
+}
+
+// supertonicSteps is the flow-matching step count: the upstream pipeline's own
+// default. Fewer is faster and drops consonants first.
+const supertonicSteps = 8
+
+func newSupertonic(dir string) (*supertonic, error) {
+	f, err := files(filepath.Join(dir, "supertonic3"), "duration_predictor.int8.onnx", "text_encoder.int8.onnx",
+		"vector_estimator.int8.onnx", "vocoder.int8.onnx", "tts.json", "unicode_indexer.bin", "voice.bin")
+	if err != nil {
+		return nil, err
+	}
+	var c sherpa.OfflineTtsConfig
+	c.Model.Supertonic = sherpa.OfflineTtsSupertonicModelConfig{
+		DurationPredictor: f[0], TextEncoder: f[1], VectorEstimator: f[2], Vocoder: f[3],
+		TtsJson: f[4], UnicodeIndexer: f[5], VoiceStyle: f[6],
+	}
+	c.Model.NumThreads = threads()
+	c.Model.Provider = "cpu"
+	c.MaxNumSentences = 1
+	t := sherpa.NewOfflineTts(&c)
+	if t == nil {
+		return nil, fmt.Errorf("sherpa refused the supertonic config")
+	}
+	if n := t.NumSpeakers(); n != len(supertonicVoices) {
+		return nil, fmt.Errorf("supertonic has %d voices; this build names %d", n, len(supertonicVoices))
+	}
+	return &supertonic{tts: t, rate: t.SampleRate(), run: newWorker()}, nil
+}
+
+func (s *supertonic) speak(text, voice, lang string, speed float32) ([]float32, error) {
+	sid, ok := supertonicID[voice]
+	if !ok {
+		return nil, fmt.Errorf("supertonic has no voice %q", voice)
+	}
+	if !supertonicLanguages[lang] {
+		return nil, fmt.Errorf("supertonic does not speak %q", lang)
+	}
+	extra, _ := json.Marshal(map[string]string{"lang": lang})
+	var out *sherpa.GeneratedAudio
+	s.run.do(func() {
+		out = s.tts.GenerateWithConfig(text, &sherpa.GenerationConfig{Sid: sid, Speed: speed, NumSteps: supertonicSteps, Extra: extra}, nil)
+	})
+	if out == nil || len(out.Samples) == 0 {
+		return nil, fmt.Errorf("supertonic produced no audio for this input")
+	}
+	return resample(out.Samples, s.rate, Spoken), nil
 }
 
 // silero is the voice activity detector, used two ways: as a session's squelch

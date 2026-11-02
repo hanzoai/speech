@@ -74,8 +74,41 @@ func kokoroLang(voice string) string {
 	return "en-us"
 }
 
+// supertonicVoices are Supertonic 3's ten voice styles in speaker-id order: the
+// index is the sid sherpa takes. voice.bin holds F1..F5 then M1..M5 (measured
+// against the published voice_styles/*.json); newSupertonic checks the count.
+var supertonicVoices = []string{"F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"}
+
+var supertonicID = func() map[string]int {
+	m := make(map[string]int, len(supertonicVoices))
+	for i, v := range supertonicVoices {
+		m[v] = i
+	}
+	return m
+}()
+
+func supertonicHas(v string) bool { _, ok := supertonicID[v]; return ok }
+
 // defaultVoice is what a model speaks in when the caller names no voice.
-var defaultVoice = map[string]string{"kokoro": "af_heart"}
+var defaultVoice = map[string]string{"kokoro": "af_heart", "supertonic": "F1"}
+
+// carried is the supertonic voice that stands in for a kokoro or OpenAI voice
+// when a request moves to supertonic for its language: the same character —
+// a woman's voice for a woman's, a man's for a man's — so a caller who chose
+// "nova" or "onyx" and then asked for Arabic still hears the voice they chose.
+func carried(asked string) (string, bool) {
+	k, ok := openaiVoices[asked]
+	if !ok {
+		k = asked
+	}
+	if _, ok := kokoroID[k]; !ok || len(k) < 2 {
+		return "", false
+	}
+	if k[1] == 'm' {
+		return "M1", true
+	}
+	return "F1", true
+}
 
 // voice resolves a caller's voice for a model, or says which ones exist.
 func voice(model, asked string) (string, error) {
@@ -98,6 +131,15 @@ func voice(model, asked string) (string, error) {
 		sort.Strings(names)
 		return "", fmt.Errorf("unknown voice %q for kokoro; voices: %s; OpenAI names: %s",
 			asked, strings.Join(kokoroVoices, ", "), strings.Join(names, ", "))
+	case "supertonic":
+		if u := strings.ToUpper(v); supertonicHas(u) {
+			return u, nil
+		}
+		if c, ok := carried(v); ok {
+			return c, nil
+		}
+		return "", fmt.Errorf("unknown voice %q for supertonic; voices: %s, or a kokoro or OpenAI voice name",
+			asked, strings.Join(supertonicVoices, ", "))
 	}
 	return "", fmt.Errorf("model %q speaks nothing", model)
 }

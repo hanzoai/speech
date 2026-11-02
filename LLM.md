@@ -8,6 +8,8 @@ Nothing here authenticates: the ai plane (hanzoai/ai, behind api.hanzo.ai)
 fronts it, authenticates every caller and meters what this service reports.
 Customer-facing names say "Hanzo voice"; the model ids below are upstream ids
 behind the gateway (`zen-scribe`, `zen-voice-mini` route to them).
+`zen-voice-mini` speaks Arabic: its upstream is `kokoro`, which hands a language
+it has no voice for to `supertonic` (Speaking, below).
 
 ## Files
 
@@ -15,7 +17,7 @@ behind the gateway (`zen-scribe`, `zen-voice-mini` route to them).
 `transcript.go` the growing transcript + squelch · `audio.go` ffmpeg in, wav/pcm
 out · `voices.go` · `language.go` · `weights.go` S3 fetch · `sherpa.go` the ONLY
 file that touches the native runtime. `speech_test.go` replaces every model;
-`live_test.go` runs the real ones.
+`live_test.go` and `live_arabic_test.go` run the real ones.
 
 ## Models and licences
 
@@ -25,6 +27,7 @@ file that touches the native runtime. `speech_test.go` replaces every model;
 | `whisper` | OpenAI Whisper large-v3-turbo, int8, any language | MIT | github.com/openai/whisper; encoder from sherpa-onnx-whisper-turbo, decoder re-exported (below) |
 | (LID) | Whisper tiny int8, spoken language identification | MIT | sherpa-onnx-whisper-tiny |
 | `kokoro` | Kokoro-82M v1.0, 54 voices | Apache-2.0 | huggingface.co/hexgrad/Kokoro-82M, sherpa-onnx kokoro-multi-lang-v1_0 |
+| `supertonic` | Supertonic 3, 10 voices, 31 languages (Arabic) | OpenRAIL-M (use-based restrictions) | huggingface.co/Supertone/supertonic-3, sherpa-onnx-supertonic-3-tts-int8-2026-05-11 |
 | (VAD) | Silero VAD | MIT | github.com/snakers4/silero-vad |
 
 espeak-ng (GPL-3.0+) is built into sherpa-onnx's TTS front end and its data
@@ -122,6 +125,43 @@ and the model's default is en-us), so only the Chinese lexicon ships. espeak
 reads no kanji: Japanese voices speak kana correctly and kanji badly, and Hindi
 round-trips poorly. European voices round-trip exactly.
 
+## Speaking: which engine, in which language
+
+`speaker` (speech.go) decides, from `model`, `language` and the text. `kokoro`
+keeps every language one of its voices speaks (en, es, fr, hi, it, ja, pt, zh;
+the voice decides which) and hands a language it lacks to `supertonic`: one
+named in `language`, or, with none named, text that is mostly Arabic script —
+no Kokoro voice reads it. A language neither speaks (Persian, Urdu) is a 400
+naming both lists. `supertonic` asked for by name reads `language`, else Arabic
+script, else English. The answer names the engine that spoke in
+`X-Speech-Model` and the language in `Content-Language`. So the one model id the
+gateway sells, `zen-voice-mini`, speaks Arabic with no new SKU.
+
+Supertonic's voices are `F1`–`F5` and `M1`–`M5` (sids 0–9: voice.bin holds the
+F voices first, measured against the published voice_styles). A kokoro or
+OpenAI voice carried over to supertonic keeps its character: a woman's voice
+becomes `F1`, a man's `M1` — "onyx" asked for Arabic is still a man. It speaks
+at 44.1 kHz and is resampled to 24 kHz in Go (`resample`, windowed sinc), so
+every caller still reads one rate. Eight flow-matching steps, the upstream
+default; at five, intelligibility fell (round-trip character error 1.9% against
+0.9% at eight, measured with the fp32 graphs).
+
+**Licence obligations travel with it.** OpenRAIL-M paragraph 4(a): when the
+model is hosted for others, its use-based restrictions (Attachment A) must be
+an enforceable provision of the agreement users accept, and users told the
+model is subject to them. hanzo.ai's acceptable use policy carries them; the
+full licence ships beside the weights (`supertonic3/LICENSE`) and NOTICE says
+which restrictions bite hardest (impersonation, medical advice, unlabelled
+machine output).
+
+**`pcm` streams.** Raw pcm has no header to fill in at the end, so a pcm
+request is synthesised sentence by sentence (`sentencesOf`: after `. ! ? ؟ ؛ …`
+and at line breaks) and each is written and flushed as it is made, with 0.15 s
+of quiet between them; a caller that reads as it goes plays the first sentence
+while the rest is made, and hanging up stops the synthesis. sherpa's own
+progress callback is not used: for supertonic it delivers nothing until the
+whole utterance is done (measured). Every other format is made whole.
+
 ## The growing transcript (`/v1/audio/transcript`)
 
 `POST` opens (`{model, language, format: pcm16, rate: 16000, channels: 1}` →
@@ -152,6 +192,9 @@ round-trips poorly. European voices round-trip exactly.
   session at a time; passes queue in the recognizer's FIFO behind other sessions'.
 - A parakeet session that names no language waits for 2 s of speech, identifies
   it once, and keeps the answer.
+- **`language`** on every ack is what is being spoken, ISO-639-1, once a caller
+  named it or the session identified it (absent before): a conversation answers
+  in it, and a voice for it.
 
 **Streaming talk mode is `/v1/voice`, not a socket here.** The Python LLM.md
 said a WebSocket could not cross the plane (zap-proto/http built a request as
@@ -174,7 +217,7 @@ KMS `hanzo/prod:/hanzo-s3`, synced as secret `s3-credentials`) into an emptyDir
 at `/models`, hashing each as it streams and renaming it into place only when
 it agrees. `/healthz` is 503 until every model has loaded. A file already there
 at the right size is kept, so a dev box with `MODELS=/home/z/models/speech`
-fetches nothing. 371 files, 2.19 GB.
+fetches nothing. 379 files, 2.33 GB.
 
 Changing a weight: put the file under the models dir, upload it to the same
 key, regenerate `weights.sum`:
@@ -208,6 +251,12 @@ S3 in 17 s and loads every model in 2.2 s: Ready 19 s after start.
 
 On dgx, four big cores (`taskset -c 5-8`): parakeet RTF 0.024, whisper 0.25,
 kokoro 0.21, language ID 0.14 s per call.
+
+supertonic, Arabic, eight steps, on four quiet Zen 5 cores of evo (GOMAXPROCS 4,
+the pod's limit): 7.8 s of audio in 0.86 s (RTF 0.11), a one-word sentence in
+0.39 s. On a dgx under load 100 the same call ran at RTF 5–6 — a contended box
+measures the box, not the model. Round trip through whisper, Modern Standard,
+Gulf and Egyptian: character error 0, 0 and 0–8.8% (live_arabic_test.go).
 
 ## Release and deploy
 

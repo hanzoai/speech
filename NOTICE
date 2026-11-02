@@ -35,6 +35,21 @@ kokoro — Kokoro-82M v1.0, 54 voices
   Source: https://huggingface.co/hexgrad/Kokoro-82M; ONNX export
   kokoro-multi-lang-v1_0 by k2-fsa sherpa-onnx.
 
+supertonic — Supertonic 3, ten voices, 31 languages
+  Copyright (c) Supertone Inc. The model is licensed under the BigScience
+  Open RAIL-M License (dated August 18, 2022), whose full text ships beside the
+  weights as supertonic3/LICENSE; its inference code is MIT.
+  Source: https://huggingface.co/Supertone/supertonic-3; int8 ONNX export
+  sherpa-onnx-supertonic-3-tts-int8-2026-05-11 by k2-fsa sherpa-onnx, served
+  unmodified from that export.
+  Use-based restrictions: paragraph 5 and Attachment A of that license bind
+  every use of this model, and paragraph 4(a) requires them to be an
+  enforceable provision of the agreement under which Hanzo serves it: the
+  acceptable use policy at https://hanzo.ai/legal/acceptable-use carries them.
+  Among them, the model may not be used to impersonate others without consent,
+  to give medical advice, or to publish its output without saying it is
+  machine generated.
+
 Voice activity — Silero VAD
   Copyright (c) 2020-present Silero Team. Licensed under the MIT License.
   Source: https://github.com/snakers4/silero-vad

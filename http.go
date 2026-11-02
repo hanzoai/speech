@@ -222,11 +222,14 @@ func present[T any](names []string, have map[string]T) []string {
 	return out
 }
 
-// speakRequest is OpenAI's /v1/audio/speech body.
+// speakRequest is OpenAI's /v1/audio/speech body, plus `language`: ISO-639-1,
+// the language the input is in. It is what lets one model id speak a language
+// its own voices cannot (speaker, speech.go).
 type speakRequest struct {
 	Model          string   `json:"model"`
 	Input          string   `json:"input"`
 	Voice          string   `json:"voice"`
+	Language       string   `json:"language"`
 	ResponseFormat string   `json:"response_format"`
 	Speed          *float64 `json:"speed"`
 }
@@ -244,12 +247,35 @@ func (s *server) speech(w http.ResponseWriter, r *http.Request, sp *speech) {
 	if ask.Model == "" {
 		ask.Model = "kokoro"
 	}
-	m := sp.mouths[ask.Model]
-	if m == nil {
+	if sp.mouths[ask.Model] == nil {
 		fail(w, http.StatusNotFound, "unknown model %q; speech models: %s", ask.Model, strings.Join(present(spokenBy, sp.mouths), ", "))
 		return
 	}
-	v, err := voice(ask.Model, ask.Voice)
+	lang, err := language(ask.Language)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	text := strings.TrimSpace(ask.Input)
+	if text == "" {
+		fail(w, http.StatusBadRequest, "speech needs an `input`")
+		return
+	}
+	if len([]rune(text)) > maxInput {
+		fail(w, http.StatusRequestEntityTooLarge, "`input` exceeds %d characters", maxInput)
+		return
+	}
+	model, lang, err := speaker(ask.Model, lang, text)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	m := sp.mouths[model]
+	if m == nil {
+		fail(w, http.StatusServiceUnavailable, "%s speaks %q and is not loaded here", model, lang)
+		return
+	}
+	v, err := voice(model, ask.Voice)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
@@ -275,17 +301,45 @@ func (s *server) speech(w http.ResponseWriter, r *http.Request, sp *speech) {
 		fail(w, http.StatusBadRequest, "speed %v is outside 0.25 to 4.0", speed)
 		return
 	}
-	text := strings.TrimSpace(ask.Input)
-	if text == "" {
-		fail(w, http.StatusBadRequest, "speech needs an `input`")
-		return
-	}
-	if len([]rune(text)) > maxInput {
-		fail(w, http.StatusRequestEntityTooLarge, "`input` exceeds %d characters", maxInput)
-		return
-	}
 	began := time.Now()
-	said, err := m.speak(text, v, float32(speed))
+	// X-Speech-Model names the engine that spoke, so a caller who sent kokoro
+	// can see its Arabic was said by supertonic.
+	w.Header().Set("X-Speech-Model", model)
+	if lang != "" {
+		w.Header().Set("Content-Language", lang)
+	}
+	if ask.ResponseFormat == "pcm" {
+		// Raw pcm has no header to fill in at the end, so it streams: each
+		// sentence is synthesised, written and flushed in turn, and a caller
+		// that reads as it goes plays the first while the rest is made.
+		w.Header().Set("Content-Type", formats["pcm"].mime)
+		flush, _ := w.(http.Flusher)
+		var spoken float64
+		for i, s := range sentencesOf(text) {
+			said, err := m.speak(s, v, lang, float32(speed))
+			if err != nil {
+				if i == 0 {
+					fail(w, http.StatusInternalServerError, "synthesis failed: %v", err)
+				} else {
+					slog.Warn("speech stream ended early", "model", model, "sentence", i, "err", err)
+				}
+				return
+			}
+			if i > 0 {
+				said = append(make([]float32, int(Breath*Spoken)), said...)
+			}
+			if _, err := w.Write(pcm16(said)); err != nil || r.Context().Err() != nil {
+				return // the caller hung up: stop synthesising what nobody hears
+			}
+			if flush != nil {
+				flush.Flush()
+			}
+			spoken += float64(len(said)) / Spoken
+		}
+		slog.Info("spoke", "model", model, "voice", v, "lang", lang, "chars", len(text), "audio_s", spoken, "wall_s", time.Since(began).Seconds(), "stream", true)
+		return
+	}
+	said, err := m.speak(text, v, lang, float32(speed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "synthesis failed: %v", err)
 		return
@@ -295,7 +349,7 @@ func (s *server) speech(w http.ResponseWriter, r *http.Request, sp *speech) {
 		fail(w, http.StatusInternalServerError, "%v", err)
 		return
 	}
-	slog.Info("spoke", "model", ask.Model, "voice", v, "chars", len(text), "audio_s", float64(len(said))/Spoken, "wall_s", time.Since(began).Seconds())
+	slog.Info("spoke", "model", model, "voice", v, "lang", lang, "chars", len(text), "audio_s", float64(len(said))/Spoken, "wall_s", time.Since(began).Seconds())
 	w.Header().Set("Content-Type", mime)
 	_, _ = w.Write(audio)
 }
